@@ -906,8 +906,12 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 
 	while (gIsRunning)
 	{
-		while (PeekMessageW(&WndMsg, NULL, 0, 0, PM_REMOVE))
+		while (PeekMessageW(&WndMsg, NULL, 0, 0, PM_REMOVE)) {
+			if (gSettingsWnd && IsDialogMessageW(gSettingsWnd, &WndMsg))
+				continue;
+			TranslateMessage(&WndMsg);
 			DispatchMessageW(&WndMsg);
+		}
 
 		Sleep(5);
 	}

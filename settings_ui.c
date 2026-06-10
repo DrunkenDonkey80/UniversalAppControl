@@ -3,7 +3,9 @@
 #include "Main.h"
 #include "config.h"
 #include "install.h"
+#include "worker.h"
 #include <commctrl.h>
+#include <string.h>
 #pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Gdi32.lib")
@@ -112,6 +114,32 @@ void ShowSettingsWindow(HINSTANCE inst, HWND owner) {
     ShowWindow(gSettingsWnd, SW_SHOW);
 }
 
+static void ApplyFieldsToSelection(HWND wnd) {
+    if (gSelected < 0 || gSelected >= gNumProfiles) return;
+    PROFILE_CONFIG* p = &gProfiles[gSelected];
+
+    GetDlgItemTextW(wnd, IDC_NAME, p->ProgramExeName, MAX_NAME);
+
+    wchar_t hk[64]; GetDlgItemTextW(wnd, IDC_HOTKEY, hk, _countof(hk));
+    u32 vk = 0; UINT mods = 0;
+    if (hk[0] && ParseHotkey(hk, &vk, &mods)) {
+        p->HotKey = vk; p->HotKeyModifiers = mods;
+    } else if (hk[0]) {
+        MessageBoxW(wnd, L"Invalid hotkey. Example: Ctrl+Alt+V", APPNAME, MB_OK | MB_ICONWARNING);
+        FormatHotkey(p->HotKey, p->HotKeyModifiers, hk, _countof(hk));
+        SetDlgItemTextW(wnd, IDC_HOTKEY, hk);
+    }
+
+    p->HideEnabled     = IsDlgButtonChecked(wnd, IDC_HIDE)  == BST_CHECKED;
+    p->MinimizeEnabled = IsDlgButtonChecked(wnd, IDC_MIN)   == BST_CHECKED;
+    p->PauseEnabled    = IsDlgButtonChecked(wnd, IDC_PAUSE) == BST_CHECKED;
+
+    SaveConfig();
+    Job j = { JOB_RELOAD_CONFIG, 0 };
+    JobQueuePush(j);
+    RefreshList(wnd);
+}
+
 static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE:
@@ -124,6 +152,38 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                 LPNMLISTVIEW nv = (LPNMLISTVIEW)lp;
                 if ((nv->uChanged & LVIF_STATE) && (nv->uNewState & LVIS_SELECTED))
                     LoadSelectionToFields(wnd, (int)nv->lParam);
+            }
+            return 0;
+        }
+        case WM_COMMAND: {
+            int id = LOWORD(wp), code = HIWORD(wp);
+            switch (id) {
+                case IDC_NAME:
+                case IDC_HOTKEY:
+                    if (code == EN_KILLFOCUS) ApplyFieldsToSelection(wnd);
+                    break;
+                case IDC_HIDE: case IDC_MIN: case IDC_PAUSE:
+                    if (code == BN_CLICKED) ApplyFieldsToSelection(wnd);
+                    break;
+                case IDC_REMOVE:
+                    if (gSelected >= 0 && gSelected < gNumProfiles) {
+                        memmove(&gProfiles[gSelected], &gProfiles[gSelected + 1],
+                                (gNumProfiles - gSelected - 1) * sizeof(PROFILE_CONFIG));
+                        gNumProfiles--;
+                        gSelected = -1;
+                        SaveConfig();
+                        Job j = { JOB_RELOAD_CONFIG, 0 }; JobQueuePush(j);
+                        RefreshList(wnd);
+                        LoadSelectionToFields(wnd, -1);
+                    }
+                    break;
+                case IDC_STARTUP:
+                    if (code == BN_CLICKED)
+                        SetStartupEnabled(IsDlgButtonChecked(wnd, IDC_STARTUP) == BST_CHECKED);
+                    break;
+                case IDC_OPENINI:  OpenConfigFolder(); break;
+                case IDC_INSTALL:  InstallToUserPrograms(wnd); break;
+                case IDC_ADD:      /* Task 17 */ break;
             }
             return 0;
         }

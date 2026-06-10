@@ -7,6 +7,9 @@
 #include <commctrl.h>
 #include <shlwapi.h>
 #pragma comment(lib, "Shlwapi.lib")
+#include <tlhelp32.h>
+#include <shellapi.h>
+#pragma comment(lib, "Shell32.lib")
 #include <string.h>
 #include <stdio.h>
 #pragma comment(lib, "Comctl32.lib")
@@ -196,7 +199,22 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 case IDC_OPENINI:  OpenConfigFolder(); break;
                 case IDC_INSTALL:  InstallToUserPrograms(wnd); break;
-                case IDC_ADD:      /* Task 17 */ break;
+                case IDC_ADD: {
+                    wchar_t name[MAX_NAME], path[MAX_PATH];
+                    if (PickRunningProcess(wnd, name, MAX_NAME, path, MAX_PATH)
+                        && gNumProfiles < MAX_PROFILES) {
+                        EnterCriticalSection(&gHotkeyLock);
+                        int idx = gNumProfiles++;
+                        memset(&gProfiles[idx], 0, sizeof(gProfiles[idx]));
+                        wcscpy_s(gProfiles[idx].ProgramExeName, MAX_NAME, name);
+                        wcscpy_s(gProfiles[idx].ProgramPath, MAX_PATH, path);
+                        LeaveCriticalSection(&gHotkeyLock);
+                        SaveConfig();
+                        Job j = { JOB_RELOAD_CONFIG, 0 }; JobQueuePush(j);
+                        RefreshList(wnd);
+                    }
+                    break;
+                }
             }
             return 0;
         }
@@ -206,8 +224,108 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(wnd, msg, wp, lp);
 }
 
+typedef struct { wchar_t name[MAX_NAME]; wchar_t path[MAX_PATH]; } PickRow;
+static PickRow gPickRows[2048];
+static int gPickCount = 0;
+static int gPickResult = -1;
+static bool gPickDone = false;
+
+static void FillProcessList(HWND list, HIMAGELIST il) {
+    gPickCount = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (gPickCount >= 2048) break;
+            PickRow* r = &gPickRows[gPickCount];
+            wcscpy_s(r->name, MAX_NAME, pe.szExeFile);
+            r->path[0] = 0;
+            HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (h) {
+                DWORD cb = MAX_PATH;
+                QueryFullProcessImageNameW(h, 0, r->path, &cb);
+                CloseHandle(h);
+            }
+            int iconIdx = -1;
+            if (r->path[0]) {
+                SHFILEINFOW sfi = { 0 };
+                if (SHGetFileInfoW(r->path, 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON)) {
+                    iconIdx = ImageList_AddIcon(il, sfi.hIcon);
+                    DestroyIcon(sfi.hIcon);
+                }
+            }
+            LVITEMW it = { 0 };
+            it.mask = LVIF_TEXT | LVIF_PARAM | (iconIdx >= 0 ? LVIF_IMAGE : 0);
+            it.iItem = gPickCount; it.lParam = gPickCount; it.iImage = iconIdx;
+            it.pszText = r->name;
+            int row = ListView_InsertItem(list, &it);
+            ListView_SetItemText(list, row, 1, r->path);
+            gPickCount++;
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+}
+
+static LRESULT CALLBACK PickProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_CREATE: {
+            HWND list = MakeChild(wnd, WC_LISTVIEWW, L"",
+                LVS_REPORT | LVS_SINGLESEL | WS_BORDER, 10, 10, 460, 300, IDC_PICKLIST);
+            ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT);
+            LVCOLUMNW c = { 0 }; c.mask = LVCF_TEXT | LVCF_WIDTH;
+            c.pszText = L"Process"; c.cx = 160; ListView_InsertColumn(list, 0, &c);
+            c.pszText = L"Path";    c.cx = 290; ListView_InsertColumn(list, 1, &c);
+            HIMAGELIST il = ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 16, 16);
+            ListView_SetImageList(list, il, LVSIL_SMALL);
+            FillProcessList(list, il);
+            MakeChild(wnd, L"BUTTON", L"Add", BS_DEFPUSHBUTTON, 300, 320, 80, 26, IDC_PICKOK);
+            MakeChild(wnd, L"BUTTON", L"Cancel", BS_PUSHBUTTON, 390, 320, 80, 26, IDC_PICKCANCEL);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wp) == IDC_PICKOK) {
+                HWND list = GetDlgItem(wnd, IDC_PICKLIST);
+                int sel = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+                if (sel >= 0) {
+                    LVITEMW it = { 0 }; it.mask = LVIF_PARAM; it.iItem = sel;
+                    ListView_GetItem(list, &it);
+                    gPickResult = (int)it.lParam;
+                }
+                gPickDone = true; DestroyWindow(wnd);
+            } else if (LOWORD(wp) == IDC_PICKCANCEL) {
+                gPickResult = -1; gPickDone = true; DestroyWindow(wnd);
+            }
+            return 0;
+        case WM_CLOSE: gPickResult = -1; gPickDone = true; DestroyWindow(wnd); return 0;
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
 bool PickRunningProcess(HWND parent, wchar_t* outName, int nameCch, wchar_t* outPath, int pathCch) {
-    // Implemented in Task 17
-    (void)parent; (void)outName; (void)nameCch; (void)outPath; (void)pathCch;
-    return false;
+    static bool reg = false;
+    if (!reg) {
+        WNDCLASSW wc = { 0 };
+        wc.lpfnWndProc = PickProc; wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"UAC_PickWnd";
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        RegisterClassW(&wc); reg = true;
+    }
+    gPickResult = -1; gPickDone = false;
+    HWND wnd = CreateWindowExW(0, L"UAC_PickWnd", L"Pick a running process",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 500, 390, parent, NULL, GetModuleHandleW(NULL), NULL);
+    ShowWindow(wnd, SW_SHOW);
+    EnableWindow(parent, FALSE);
+    MSG m;
+    while (!gPickDone && GetMessageW(&m, NULL, 0, 0)) {
+        if (!IsDialogMessageW(wnd, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+    if (gPickResult < 0) return false;
+    wcscpy_s(outName, nameCch, gPickRows[gPickResult].name);
+    wcscpy_s(outPath, pathCch, gPickRows[gPickResult].path);
+    return true;
 }

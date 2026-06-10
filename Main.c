@@ -120,39 +120,12 @@ static void ReadConfigList(const wchar_t* section, const wchar_t* variable, wcha
 }
 
 static void RegisterConfigHotkey(const wchar_t* section, const wchar_t* variable, int profileID) {
-	u32 hotKey = 0;
-	UINT modifiers = 0;
-
-	// Maximum buffer size for section names
-	wchar_t buffer[256] = { 0 };
-	if (GetPrivateProfileString(section, variable, NULL, buffer, sizeof(buffer) / sizeof(wchar_t), iniFilePath) <= 0)
+	wchar_t raw[256] = { 0 };
+	if (GetPrivateProfileStringW(section, variable, NULL, raw, _countof(raw), iniFilePath) <= 0)
 		return;
-
-	//null the +
-	for (int i = 0; buffer[i]; i++)
-		if (buffer[i] == L'+' || buffer[i] == L'|' || buffer[i] == L'&')
-			buffer[i] = 0;
-
-	//walk through
-	wchar_t* b = buffer;
-	while (*b) {
-		if (!lstrcmpi(b, L"shift") || !lstrcmpi(b, L"lshift") || !lstrcmpi(b, L"rshift"))
-			modifiers |= MOD_SHIFT;
-		else if (!lstrcmpi(b, L"alt") || !lstrcmpi(b, L"lalt") || !lstrcmpi(b, L"ralt"))
-			modifiers |= MOD_ALT;
-		else if (!lstrcmpi(b, L"ctrl") || !lstrcmpi(b, L"lctrl") || !lstrcmpi(b, L"rctrl") || !lstrcmpi(b, L"control") || !lstrcmpi(b, L"lcontrol") || !lstrcmpi(b, L"rcontrol"))
-			modifiers |= MOD_CONTROL;
-		else if (!lstrcmpi(b, L"win") || !lstrcmpi(b, L"window") || !lstrcmpi(b, L"windows"))
-			modifiers |= MOD_WIN;
-		else {
-			KEYCode* key = findKeyWithName(b);
-			if (key == NULL)
-				return;
-			hotKey = key->vkCode;
-		}
-
-		b += lstrlen(b) + 1;
-	}
+	u32 hotKey = 0; UINT modifiers = 0;
+	if (!ParseHotkey(raw, &hotKey, &modifiers))
+		return;
 
 	if (hotKey != 0) {
 		//we have it already registered?
@@ -256,6 +229,8 @@ static bool ReadConfig() {
 	}
 	return true;
 }
+
+bool LoadConfig(void) { return ReadConfig(); }
 
 const wchar_t* GetLastErorText() {
 	static wchar_t messageBuffer[1024];

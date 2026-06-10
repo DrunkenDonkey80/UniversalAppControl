@@ -1,7 +1,9 @@
 #include <Windows.h>
 #include <stdio.h>
+#include <string.h>
 #include "selftest.h"
 #include "config.h"
+#include "Main.h"
 
 static int gFails = 0;
 static FILE* gLog = NULL;
@@ -40,6 +42,52 @@ int RunSelfTests(void) {
         CHECK(endsOk, L"GetConfigPath ends with UniversalAppControl\\config.ini");
         CHECK(GetFileAttributesW(GetConfigDir()) != INVALID_FILE_ATTRIBUTES,
               L"GetConfigDir exists after call");
+    }
+
+    {
+        u32 vk = 0; UINT mods = 0;
+        bool ok = ParseHotkey(L"Ctrl+Alt+V", &vk, &mods);
+        CHECK(ok && vk == 'V' && mods == (MOD_CONTROL | MOD_ALT), L"ParseHotkey Ctrl+Alt+V");
+
+        wchar_t buf[64];
+        FormatHotkey('V', MOD_CONTROL | MOD_ALT, buf, _countof(buf));
+        CHECK(wcslen(buf) > 0, L"FormatHotkey non-empty");
+        u32 vk2 = 0; UINT mods2 = 0;
+        CHECK(ParseHotkey(buf, &vk2, &mods2) && vk2 == 'V' && mods2 == (MOD_CONTROL | MOD_ALT),
+              L"FormatHotkey round-trips through ParseHotkey");
+
+        CHECK(!ParseHotkey(L"Ctrl+Alt", &vk, &mods), L"ParseHotkey rejects modifier-only");
+    }
+
+    {
+        // SaveConfig writes the REAL %APPDATA% config, so back it up first and restore after.
+        const wchar_t* cfg = GetConfigPath();
+        wchar_t bak[MAX_PATH];
+        swprintf_s(bak, _countof(bak), L"%s.selftest.bak", cfg);
+        bool hadConfig = CopyFileW(cfg, bak, FALSE) != FALSE;
+
+        gNumProfiles = 1;
+        memset(&gProfiles[0], 0, sizeof(gProfiles[0]));
+        wcscpy_s(gProfiles[0].ProgramExeName, MAX_NAME, L"Viber.exe");
+        wcscpy_s(gProfiles[0].ProgramPath, MAX_PATH, L"C:\\x\\Viber.exe");
+        gProfiles[0].HotKey = 'V';
+        gProfiles[0].HotKeyModifiers = MOD_CONTROL | MOD_ALT;
+        gProfiles[0].HideEnabled = TRUE;
+        gProfiles[0].PauseEnabled = TRUE;
+        SaveConfig();
+
+        gNumProfiles = 0;
+        LoadConfig();
+        bool found = false;
+        for (int i = 0; i < gNumProfiles; i++)
+            if (_wcsicmp(gProfiles[i].ProgramExeName, L"Viber.exe") == 0 &&
+                gProfiles[i].HideEnabled && gProfiles[i].PauseEnabled)
+                found = true;
+        CHECK(found, L"SaveConfig -> LoadConfig round-trips an entry");
+
+        // Restore the user's real config.
+        if (hadConfig) { CopyFileW(bak, cfg, FALSE); DeleteFileW(bak); }
+        else { DeleteFileW(cfg); }   // there was none; remove the test artifact
     }
 
     LogLine(L"--- %d failure(s) ---", gFails);

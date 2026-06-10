@@ -60,6 +60,7 @@ static KEYCode keyCodes[] =
 	{VK_OEM_1, L"VK_OEM_1"},     // Keyboard ; and :
 	{VK_OEM_7, L"VK_OEM_7"},  // Keyboard ' and "
 	{VK_OEM_3, L"VK_OEM_3"},         // Keyboard ` and ~
+	{VK_OEM_3, L"VK_TILDE"},         // Keyboard ` and ~
 	{VK_OEM_COMMA, L"VK_OEM_COMMA"}, // Keyboard , and <
 	{VK_OEM_PERIOD, L"VK_OEM_PERIOD"}, // Keyboard . and >
 	{VK_OEM_2, L"VK_OEM_2"},         // Keyboard / and ?
@@ -80,6 +81,8 @@ static KEYCode keyCodes[] =
 
 	{VK_PRINT, L"VK_PRINT"},        // Keyboard Print Screen
 	{VK_SCROLL, L"VK_SCROLL"}, // Keyboard Scroll Lock
+	{VK_SCROLL, L"VK_SCRLK"}, // Keyboard Scroll Lock
+	{VK_SCROLL, L"VK_SCROLLLOCK"}, // Keyboard Scroll Lock
 	{VK_PAUSE, L"VK_PAUSE"},        // Keyboard Pause
 	{VK_INSERT, L"VK_INSERT"},     // Keyboard Insert
 	{VK_HOME, L"VK_HOME"},           // Keyboard Home
@@ -133,5 +136,12 @@ const KEYCode* findKeyWithName(const TCHAR* name) {
 		if (!lstrcmpi(keyCodes[i].vkName, name) || !lstrcmpi(&keyCodes[i].vkName[3], name))
 			return &keyCodes[i];
 	}
+	return NULL;
+}
+
+const wchar_t* FindKeyNameByVk(unsigned long vk) {
+	for (int i = 0; keyCodes[i].vkCode != HID_KEY_NONE; i++)
+		if (keyCodes[i].vkCode == (unsigned char)vk)
+			return &keyCodes[i].vkName[3];  // skip "VK_"
 	return NULL;
 }

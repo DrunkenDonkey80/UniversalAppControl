@@ -547,3 +547,4 @@ typedef struct KEYCode {
 
 
 extern const KEYCode* findKeyWithName(const TCHAR* name);
+extern const wchar_t* FindKeyNameByVk(unsigned long vk);

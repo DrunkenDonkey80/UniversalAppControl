@@ -760,6 +760,10 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 			return RunSelfTests();
 	}
 
+	bool autostart = false;
+	for (int ai = 1; ai < __argc; ai++)
+		if (lstrcmpiW(__wargv[ai], L"--autostart") == 0) autostart = true;
+
 	UNREFERENCED_PARAMETER(PrevInstance);
 	UNREFERENCED_PARAMETER(CmdLine);
 	UNREFERENCED_PARAMETER(CmdShow);
@@ -877,6 +881,9 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 			goto Exit;
 		}
 	}
+
+	if (!autostart)
+		ShowSettingsWindow(Instance, gConfig.TrayIcon ? gTrayNotifyIconData.hWnd : NULL);
 
 	while (gIsRunning)
 	{

@@ -1,4 +1,6 @@
 #include "worker.h"
+#include "Main.h"
+#include "config.h"
 
 #define JOB_QUEUE_CAP 256
 static Job gQueue[JOB_QUEUE_CAP];
@@ -42,6 +44,13 @@ bool JobQueuePop(Job* out) {
 
 DWORD WINAPI WorkerThreadProc(LPVOID param) {
     (void)param;
-    // Full implementation added in Task 6.
+    Job job;
+    while (JobQueuePop(&job)) {
+        switch (job.type) {
+            case JOB_TOGGLE_HOTKEY:  DispatchHotkey(job.hotkeyIndex); break;
+            case JOB_RELOAD_CONFIG:  /* implemented in Task 8 */       break;
+            case JOB_SHUTDOWN:       return 0;
+        }
+    }
     return 0;
 }

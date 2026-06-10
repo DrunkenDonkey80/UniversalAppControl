@@ -69,3 +69,6 @@ extern CONFIG gConfig;
 extern PROFILE_CONFIG gProfiles[MAX_PROFILES];
 extern int gNumProfiles;
 bool LoadConfig(void);
+
+extern CRITICAL_SECTION gHotkeyLock;   // guards gHotkeys/gNumHotkeys + Triggered
+void DispatchHotkey(int hotkeyIndex);  // worker-side: runs the heavy toggle work

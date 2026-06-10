@@ -49,6 +49,8 @@ int gNumHotkeys = 0;
 u32 gPausedProcesses[MAX_PROFILES * MAX_PROCESSES_PER_PROFILE];
 int gNumPausedProcesses=0;
 
+CRITICAL_SECTION gHotkeyLock;
+
 typedef struct _WindowInfo
 {
 	HWND WindowHandle;
@@ -291,7 +293,7 @@ bool IsProcessSuspended(DWORD processId) {
 bool SuspendProcess(u32 id) {
 	//do not suspend if already suspended
 	if (IsProcessSuspended(id)) {
-		return;
+		return true;
 	}
 
 	HANDLE ProcessHandle = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, id);
@@ -339,6 +341,7 @@ bool ResumeProcess(u32 id) {
 	NtResumeProcess(ProcessHandle);
 	CloseHandle(ProcessHandle);
 	DbgPrint(L"Process resumed!");
+	return true;
 }
 
 static BOOL CALLBACK enumWindowCallback(HWND hWnd, LPARAM lparam) {
@@ -590,16 +593,20 @@ void HandleProfile(int profileId, bool trigger) {
 	}
 }
 
-void HandleKeyboardHotkey(int hkID)
+void DispatchHotkey(int hkID)
 {
 	UpdateProcessIDs();
 	UpdateWindowProcessIDs();
 
+	EnterCriticalSection(&gHotkeyLock);
 	gHotkeys[hkID].Triggered = !gHotkeys[hkID].Triggered;
-	for (int i = 0; i < gHotkeys[hkID].NumProfileIDs; i++) {
-		int profileId = gHotkeys[hkID].ProfileIDs[i];
-		HandleProfile(profileId, gHotkeys[hkID].Triggered);
-	}
+	bool triggered = gHotkeys[hkID].Triggered;
+	int ids[MAX_PROFILES]; int n = gHotkeys[hkID].NumProfileIDs;
+	for (int i = 0; i < n; i++) ids[i] = gHotkeys[hkID].ProfileIDs[i];
+	LeaveCriticalSection(&gHotkeyLock);
+
+	for (int i = 0; i < n; i++)
+		HandleProfile(ids[i], triggered);
 }
 
 
@@ -671,19 +678,25 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 
 			//search for hotkey for that VK
+			EnterCriticalSection(&gHotkeyLock);
+			int matchIndex = -1;
 			for (int i = 0; i < gNumHotkeys; i++) {
 				if (gHotkeys[i].HotKey == vkCode) {
 					BOOL shift = GetKeyState(VK_SHIFT) & 0x8000;
-					BOOL ctrl = GetKeyState(VK_CONTROL) & 0x8000;
-					BOOL alt = GetKeyState(VK_MENU) & 0x8000;
-
+					BOOL ctrl  = GetKeyState(VK_CONTROL) & 0x8000;
+					BOOL alt   = GetKeyState(VK_MENU) & 0x8000;
 					u32 modifiers = (shift ? MOD_SHIFT : 0) | (ctrl ? MOD_CONTROL : 0) | (alt ? MOD_ALT : 0);
-					if (gHotkeys[i].Modifiers == modifiers) {
-						if (down && !wasKeyDown)
-							HandleKeyboardHotkey(i);
-						return 1;
-					}
+					if (gHotkeys[i].Modifiers == modifiers) { matchIndex = i; break; }
 				}
+			}
+			LeaveCriticalSection(&gHotkeyLock);
+
+			if (matchIndex >= 0) {
+				if (down && !wasKeyDown) {
+					Job j = { JOB_TOGGLE_HOTKEY, matchIndex };
+					JobQueuePush(j);
+				}
+				return 1;
 			}
 			DbgPrint(L"Key %s: wasDown:%d, released: %d Exit, time taken: %d\n", down ? L"pressed" : L"released", wasKeyDown, isKeyReleased, (GetTickCount() - t));
 		}
@@ -739,14 +752,22 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	UNREFERENCED_PARAMETER(CmdShow);
 
 	HHOOK hHook = NULL;
+	HANDLE workerThread = NULL;
 
 	HMODULE NtDll = NULL;
 	MSG WndMsg = { 0 };
-	//HHOOK KeyboardHook = NULL;
 
 	if (!ReadConfig())
 	{
 		MsgBox(L"Program settings failed to load. Error %s", APPNAME L" Error", MB_OK | MB_ICONERROR, GetLastErorText());
+		goto Exit;
+	}
+
+	InitializeCriticalSection(&gHotkeyLock);
+	WorkerInit();
+	workerThread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, NULL);
+	if (workerThread == NULL) {
+		MsgBox(L"Failed to start worker thread!", APPNAME L" Error", MB_OK | MB_ICONERROR);
 		goto Exit;
 	}
 
@@ -845,17 +866,13 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	while (gIsRunning)
 	{
 		while (PeekMessageW(&WndMsg, NULL, 0, 0, PM_REMOVE))
-		{
-			if (WndMsg.message == WM_HOTKEY)
-			{
-				HandleKeyboardHotkey((int)WndMsg.wParam);
-			}
-
 			DispatchMessageW(&WndMsg);
-		}
 
 		Sleep(5);
 	}
+
+	{ Job j = { JOB_SHUTDOWN, 0 }; JobQueuePush(j); }
+	if (workerThread) WaitForSingleObject(workerThread, 2000);
 
 	//restore back all profiles
 	for (int i = 0; i < gNumHotkeys; i++) {

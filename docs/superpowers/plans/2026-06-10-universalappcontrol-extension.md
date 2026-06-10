@@ -543,6 +543,13 @@ Note: `RegisterConfigHotkey` reads `Hotkey`; `SaveConfig` writes `Hotkey`; `Read
 
 ```c
     {
+        // SaveConfig writes the REAL %APPDATA% config, so back it up first and
+        // restore it after, exactly like the startup test does (no data loss).
+        const wchar_t* cfg = GetConfigPath();
+        wchar_t bak[MAX_PATH];
+        swprintf_s(bak, _countof(bak), L"%s.selftest.bak", cfg);
+        bool hadConfig = CopyFileW(cfg, bak, FALSE) != FALSE;
+
         gNumProfiles = 1;
         memset(&gProfiles[0], 0, sizeof(gProfiles[0]));
         wcscpy_s(gProfiles[0].ProgramExeName, MAX_NAME, L"Viber.exe");
@@ -561,6 +568,10 @@ Note: `RegisterConfigHotkey` reads `Hotkey`; `SaveConfig` writes `Hotkey`; `Read
                 gProfiles[i].HideEnabled && gProfiles[i].PauseEnabled)
                 found = true;
         CHECK(found, L"SaveConfig -> LoadConfig round-trips an entry");
+
+        // Restore the user's real config.
+        if (hadConfig) { CopyFileW(bak, cfg, FALSE); DeleteFileW(bak); }
+        else { DeleteFileW(cfg); }   // there was none; remove the test artifact
     }
 ```
 
@@ -1775,11 +1786,24 @@ git commit -m "feat: create Start Menu shortcut on install"
 
     // Relaunch the installed copy, then quit this instance.
     ShellExecuteW(NULL, L"open", dst, NULL, NULL, SW_SHOWNORMAL);
-    PostQuitMessage(0);   // main loop exits; mutex released on process exit
+
+    // CRITICAL: the main loop is `while (gIsRunning) {...}` and does NOT honor
+    // WM_QUIT, so PostQuitMessage alone will not exit. Tear down exactly like
+    // IDM_QUIT: remove the tray icon and clear gIsRunning so the loop ends and
+    // the process exits, releasing the single-instance mutex for the new copy.
+    extern BOOL gIsRunning;
+    extern NOTIFYICONDATA gTrayNotifyIconData;
+    Shell_NotifyIconW(NIM_DELETE, &gTrayNotifyIconData);
+    gIsRunning = FALSE;
+    PostQuitMessage(0);
     return true;
 ```
 
+Add `extern BOOL gIsRunning;` and `extern NOTIFYICONDATA gTrayNotifyIconData;` to `Main.h` (they are defined in `Main.c` at lines 55 and 57) instead of the local `extern`s above if you prefer them declared once - either compiles. `install.c` already includes `<Windows.h>` for `NOTIFYICONDATA`.
+
 Remove the old "Copied to user programs." success box (the relaunch is the visible result). Keep the earlier shortcut-warning box.
+
+Note: if Install was triggered from the settings window (`IDC_INSTALL`), this same teardown still applies - the WM_COMMAND runs on the main thread, so clearing `gIsRunning` exits the loop after the current message drain.
 
 - [ ] **Step 3: Build**
 
@@ -1848,4 +1872,7 @@ git commit -m "chore: bump version to 1.1.0"
 
 **Type/name consistency** - shared signatures are declared once in headers and reused: `GetConfigPath`/`GetConfigDir`/`SaveConfig`/`ParseHotkey`/`FormatHotkey` (config.h), `Job`/`JobType`/`JobQueuePush`/`JobQueuePop`/`WorkerInit`/`WorkerThreadProc` (worker.h), `ShowSettingsWindow`/`PickRunningProcess` (settings_ui.h), `IsStartupEnabled`/`SetStartupEnabled`/`OpenConfigFolder`/`InstallToUserPrograms`/`IsExeRunning` (install.h), `GetExePath`/`LoadConfig`/`DispatchHotkey`/`gHotkeyLock` (Main.h). `HandleKeyboardHotkey` is renamed to `DispatchHotkey` in Task 6 and the dead `WM_HOTKEY` reference is removed in Task 13.
 
-**Known follow-ups (out of scope, noted in spec):** no worker watchdog for a genuinely hung suspend/resume; no settings UI in no-tray mode.
+**Known follow-ups (out of scope, noted in spec):**
+- No worker watchdog for a genuinely hung suspend/resume.
+- No settings UI in no-tray mode.
+- Live reload (`JOB_RELOAD_CONFIG` -> `ReadConfig`) `memset`s `gProfiles` and rebuilds with `Triggered = false`. If you edit settings while an entry is *currently* hidden/paused, that entry's toggle state inverts (the next press tries to hide-again instead of show) and its `HiddenWindows` list is wiped. `gPausedProcesses` survives the memset and `RestoreWindowsForPofile` re-enumerates when `NumHiddenWindows == 0`, so it partially self-heals, but the toggle inversion is user-visible. Acceptable for now; revisit if it annoys in practice (e.g. preserve per-entry `Triggered`/`HiddenWindows` across reload by matching on exe name).

@@ -807,10 +807,14 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 		goto Exit;
 	}
 
-	gMutex = CreateMutexW(NULL, FALSE, APPNAME);
-
-	if (GetLastError() == ERROR_ALREADY_EXISTS)
-	{
+	gMutex = NULL;
+	for (int attempt = 0; attempt < 50; attempt++) {
+		gMutex = CreateMutexW(NULL, FALSE, APPNAME);
+		if (GetLastError() != ERROR_ALREADY_EXISTS) break;
+		CloseHandle(gMutex); gMutex = NULL;
+		Sleep(100);
+	}
+	if (gMutex == NULL) {
 		MsgBox(L"An instance of the program is already running.", APPNAME L" Error", MB_OK | MB_ICONERROR);
 		goto Exit;
 	}

@@ -2,14 +2,54 @@
 #include "ui_ids.h"
 #include "Main.h"
 #include "config.h"
+#include "install.h"
 #include <commctrl.h>
 #pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Gdi32.lib")
 
 HWND gSettingsWnd = NULL;
+static int gSelected = -1;
 
 static LRESULT CALLBACK SettingsProc(HWND, UINT, WPARAM, LPARAM);
+
+static void RefreshList(HWND wnd) {
+    HWND list = GetDlgItem(wnd, IDC_LIST);
+    ListView_DeleteAllItems(list);
+    for (int i = 0; i < gNumProfiles; i++) {
+        LVITEMW it = { 0 };
+        it.mask = LVIF_TEXT | LVIF_PARAM;
+        it.iItem = i; it.lParam = i;
+        it.pszText = gProfiles[i].ProgramExeName;
+        ListView_InsertItem(list, &it);
+        wchar_t hk[64];
+        FormatHotkey(gProfiles[i].HotKey, gProfiles[i].HotKeyModifiers, hk, _countof(hk));
+        ListView_SetItemText(list, i, 1, hk);
+        ListView_SetItemText(list, i, 2, L"");   // status filled in Task 16
+    }
+    CheckDlgButton(wnd, IDC_STARTUP, IsStartupEnabled() ? BST_CHECKED : BST_UNCHECKED);
+}
+
+static void LoadSelectionToFields(HWND wnd, int idx) {
+    gSelected = idx;
+    if (idx < 0 || idx >= gNumProfiles) {
+        SetDlgItemTextW(wnd, IDC_NAME, L"");
+        SetDlgItemTextW(wnd, IDC_PATH, L"");
+        SetDlgItemTextW(wnd, IDC_HOTKEY, L"");
+        CheckDlgButton(wnd, IDC_HIDE, BST_UNCHECKED);
+        CheckDlgButton(wnd, IDC_MIN, BST_UNCHECKED);
+        CheckDlgButton(wnd, IDC_PAUSE, BST_UNCHECKED);
+        return;
+    }
+    PROFILE_CONFIG* p = &gProfiles[idx];
+    SetDlgItemTextW(wnd, IDC_NAME, p->ProgramExeName);
+    SetDlgItemTextW(wnd, IDC_PATH, p->ProgramPath);
+    wchar_t hk[64]; FormatHotkey(p->HotKey, p->HotKeyModifiers, hk, _countof(hk));
+    SetDlgItemTextW(wnd, IDC_HOTKEY, hk);
+    CheckDlgButton(wnd, IDC_HIDE,  p->HideEnabled  ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(wnd, IDC_MIN,   p->MinimizeEnabled ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(wnd, IDC_PAUSE, p->PauseEnabled ? BST_CHECKED : BST_UNCHECKED);
+}
 
 static HWND MakeChild(HWND parent, const wchar_t* cls, const wchar_t* text,
                       DWORD style, int x, int y, int w, int h, int id) {
@@ -74,7 +114,19 @@ void ShowSettingsWindow(HINSTANCE inst, HWND owner) {
 
 static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-        case WM_CREATE:  CreateControls(wnd); return 0;
+        case WM_CREATE:
+            CreateControls(wnd);
+            RefreshList(wnd);
+            return 0;
+        case WM_NOTIFY: {
+            LPNMHDR nh = (LPNMHDR)lp;
+            if (nh->idFrom == IDC_LIST && nh->code == LVN_ITEMCHANGED) {
+                LPNMLISTVIEW nv = (LPNMLISTVIEW)lp;
+                if ((nv->uChanged & LVIF_STATE) && (nv->uNewState & LVIS_SELECTED))
+                    LoadSelectionToFields(wnd, (int)nv->lParam);
+            }
+            return 0;
+        }
         case WM_CLOSE:   DestroyWindow(wnd); return 0;
         case WM_DESTROY: gSettingsWnd = NULL; return 0;
     }

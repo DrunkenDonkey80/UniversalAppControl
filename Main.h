@@ -68,6 +68,8 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 extern CONFIG gConfig;
 extern PROFILE_CONFIG gProfiles[MAX_PROFILES];
 extern int gNumProfiles;
+extern BOOL gIsRunning;
+extern NOTIFYICONDATA gTrayNotifyIconData;
 bool LoadConfig(void);
 
 extern CRITICAL_SECTION gHotkeyLock;   // guards gHotkeys/gNumHotkeys + Triggered

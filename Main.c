@@ -203,9 +203,7 @@ void EnableDebugConsole() {
 }
 
 static bool ReadConfig() {
-	GetModuleFileName(NULL, &iniFilePath, MAX_PATH);
-	iniFilePath[wcslen(iniFilePath) - 3] = 0;
-	wcscat_s(iniFilePath, MAX_PATH, L"ini");
+	wcscpy_s(iniFilePath, MAX_PATH, GetConfigPath());
 
 
 	// wipe out previous config

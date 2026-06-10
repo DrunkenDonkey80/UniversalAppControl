@@ -1,6 +1,7 @@
 #include <Windows.h>
 #include <stdio.h>
 #include "selftest.h"
+#include "config.h"
 
 static int gFails = 0;
 static FILE* gLog = NULL;
@@ -29,7 +30,17 @@ int RunSelfTests(void) {
 
     gFails = 0;
     CHECK(1 + 1 == 2, L"harness sanity");
-    // later tasks append CHECK(...) calls here
+
+    {
+        const wchar_t* p = GetConfigPath();
+        size_t len = wcslen(p);
+        const wchar_t* suffix = L"\\UniversalAppControl\\config.ini";
+        bool endsOk = len > wcslen(suffix) &&
+            _wcsicmp(p + len - wcslen(suffix), suffix) == 0;
+        CHECK(endsOk, L"GetConfigPath ends with UniversalAppControl\\config.ini");
+        CHECK(GetFileAttributesW(GetConfigDir()) != INVALID_FILE_ATTRIBUTES,
+              L"GetConfigDir exists after call");
+    }
 
     LogLine(L"--- %d failure(s) ---", gFails);
     if (gLog) fclose(gLog);

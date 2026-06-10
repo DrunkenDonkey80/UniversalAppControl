@@ -50,6 +50,7 @@ u32 gPausedProcesses[MAX_PROFILES * MAX_PROCESSES_PER_PROFILE];
 int gNumPausedProcesses=0;
 
 CRITICAL_SECTION gHotkeyLock;
+UINT gTaskbarCreatedMsg = 0;
 
 typedef struct _WindowInfo
 {
@@ -711,6 +712,11 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 	LRESULT Result = 0;
 	static BOOL QuitMessageBoxIsShowing = FALSE;
 
+	if (Message == gTaskbarCreatedMsg && gTaskbarCreatedMsg != 0) {
+		Shell_NotifyIconW(NIM_ADD, &gTrayNotifyIconData);
+		return 0;
+	}
+
 	switch (Message)
 	{
 		case WM_TRAYICON:
@@ -855,6 +861,8 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 			MsgBox(L"Failed to load systray icon resource!", APPNAME L" Error", MB_OK | MB_ICONERROR);
 			goto Exit;
 		}
+
+		gTaskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
 
 		if (Shell_NotifyIconW(NIM_ADD, &gTrayNotifyIconData) == FALSE)
 		{

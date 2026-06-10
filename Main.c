@@ -236,6 +236,12 @@ static bool ReadConfig() {
 
 bool LoadConfig(void) { return ReadConfig(); }
 
+const wchar_t* GetExePath(void) {
+    static wchar_t path[MAX_PATH];
+    if (path[0] == 0) GetModuleFileNameW(NULL, path, MAX_PATH);
+    return path;
+}
+
 const wchar_t* GetLastErorText() {
 	static wchar_t messageBuffer[1024];
 

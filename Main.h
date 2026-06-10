@@ -72,3 +72,4 @@ bool LoadConfig(void);
 
 extern CRITICAL_SECTION gHotkeyLock;   // guards gHotkeys/gNumHotkeys + Triggered
 void DispatchHotkey(int hotkeyIndex);  // worker-side: runs the heavy toggle work
+const wchar_t* GetExePath(void);

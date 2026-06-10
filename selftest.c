@@ -4,6 +4,7 @@
 #include "selftest.h"
 #include "config.h"
 #include "worker.h"
+#include "install.h"
 #include "Main.h"
 
 static int gFails = 0;
@@ -100,6 +101,15 @@ int RunSelfTests(void) {
         Job out;
         CHECK(JobQueuePop(&out) && out.hotkeyIndex == 1, L"queue pops FIFO #1");
         CHECK(JobQueuePop(&out) && out.hotkeyIndex == 2, L"queue pops FIFO #2");
+    }
+
+    {
+        bool was = IsStartupEnabled();
+        CHECK(SetStartupEnabled(true), L"SetStartupEnabled(true) ok");
+        CHECK(IsStartupEnabled(), L"startup reads back enabled");
+        CHECK(SetStartupEnabled(false), L"SetStartupEnabled(false) ok");
+        CHECK(!IsStartupEnabled(), L"startup reads back disabled");
+        if (was) SetStartupEnabled(true);
     }
 
     LogLine(L"--- %d failure(s) ---", gFails);

@@ -1,6 +1,8 @@
 #include "install.h"
 #include "Main.h"
+#include "config.h"
 #include <shlobj.h>
+#include <stdio.h>
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "Shlwapi.lib")
@@ -37,7 +39,9 @@ bool SetStartupEnabled(bool enabled) {
 }
 
 void OpenConfigFolder(void) {
-    // Implemented in Task 13
+    wchar_t arg[MAX_PATH + 16];
+    swprintf_s(arg, _countof(arg), L"/select,\"%s\"", GetConfigPath());
+    ShellExecuteW(NULL, L"open", L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
 }
 
 bool InstallToUserPrograms(HWND parent) {

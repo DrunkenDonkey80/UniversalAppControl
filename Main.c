@@ -165,6 +165,7 @@ void UnregisterHotkeys() {
 }
 
 void EnableDebugConsole() {
+	if (gDbgConsole != INVALID_HANDLE_VALUE) return;  // already allocated
 	// Enable the debug console as early as possible if configured.
 				// This is so the debug console can report on the other registry settings.
 	if (AllocConsole() == FALSE)

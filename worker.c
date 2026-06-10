@@ -48,7 +48,12 @@ DWORD WINAPI WorkerThreadProc(LPVOID param) {
     while (JobQueuePop(&job)) {
         switch (job.type) {
             case JOB_TOGGLE_HOTKEY:  DispatchHotkey(job.hotkeyIndex); break;
-            case JOB_RELOAD_CONFIG:  /* implemented in Task 8 */       break;
+            case JOB_RELOAD_CONFIG: {
+                EnterCriticalSection(&gHotkeyLock);
+                LoadConfig();
+                LeaveCriticalSection(&gHotkeyLock);
+                break;
+            }
             case JOB_SHUTDOWN:       return 0;
         }
     }

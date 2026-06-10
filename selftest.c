@@ -3,6 +3,7 @@
 #include <string.h>
 #include "selftest.h"
 #include "config.h"
+#include "worker.h"
 #include "Main.h"
 
 static int gFails = 0;
@@ -88,6 +89,17 @@ int RunSelfTests(void) {
         // Restore the user's real config.
         if (hadConfig) { CopyFileW(bak, cfg, FALSE); DeleteFileW(bak); }
         else { DeleteFileW(cfg); }   // there was none; remove the test artifact
+    }
+
+    {
+        WorkerInit();
+        Job a = { JOB_TOGGLE_HOTKEY, 1 };
+        Job b = { JOB_TOGGLE_HOTKEY, 2 };
+        CHECK(JobQueuePush(a), L"queue push a");
+        CHECK(JobQueuePush(b), L"queue push b");
+        Job out;
+        CHECK(JobQueuePop(&out) && out.hotkeyIndex == 1, L"queue pops FIFO #1");
+        CHECK(JobQueuePop(&out) && out.hotkeyIndex == 2, L"queue pops FIFO #2");
     }
 
     LogLine(L"--- %d failure(s) ---", gFails);

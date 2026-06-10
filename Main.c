@@ -23,6 +23,10 @@
 #include "install.h"
 #include "selftest.h"
 
+_NtSuspendProcess NtSuspendProcess;
+_NtResumeProcess NtResumeProcess;
+_HungWindowFromGhostWindow HungWindowFromGhostWindow;
+
 CONFIG gConfig;
 
 PROFILE_CONFIG gProfiles[MAX_PROFILES];
@@ -232,10 +236,6 @@ static bool ReadConfig() {
 				EnableDebugConsole();
 
 			gConfig.TrayIcon = ReadConfigBool(sectionName, L"TrayIcon", false);
-			RegisterConfigHotkey(sectionName, L"BossHotkey", PRIFILE_ID_BOSS);
-			RegisterConfigHotkey(sectionName, L"CurrentWindowHotkey", PROFILE_ID_CURRENT);
-
-			ReadConfigList(sectionName, L"BossSections", '|', gConfig.BossSections, &gConfig.NumBossSections);
 		}
 		else {
 			//profile
@@ -246,6 +246,7 @@ static bool ReadConfig() {
 			gProfiles[gNumProfiles].MinimizeEnabled = ReadConfigBool(sectionName, L"Minimize", false);
 
 			ReadConfigString(sectionName, L"ProgramExeName", gProfiles[gNumProfiles].ProgramExeName);
+			ReadConfigString(sectionName, L"ProgramPath", gProfiles[gNumProfiles].ProgramPath);
 			ReadConfigList(sectionName, L"WindowNames", '|', &gProfiles[gNumProfiles].WindowNames, &gProfiles[gNumProfiles].NumWindows);
 
 			gNumProfiles++;
@@ -622,18 +623,6 @@ void HandleKeyboardHotkey(int hkID)
 	gHotkeys[hkID].Triggered = !gHotkeys[hkID].Triggered;
 	for (int i = 0; i < gHotkeys[hkID].NumProfileIDs; i++) {
 		int profileId = gHotkeys[hkID].ProfileIDs[i];
-
-		if (profileId == PRIFILE_ID_BOSS)
-		{
-			return;
-		}
-		if (profileId == PROFILE_ID_CURRENT)
-		{
-			return;
-		}
-		//normal profile
-
-
 		HandleProfile(profileId, gHotkeys[hkID].Triggered);
 	}
 }

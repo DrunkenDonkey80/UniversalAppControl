@@ -22,14 +22,11 @@ typedef LONG(NTAPI* _NtSuspendProcess) (IN HANDLE ProcessHandle);
 typedef LONG(NTAPI* _NtResumeProcess) (IN HANDLE ProcessHandle);
 typedef HWND(NTAPI* _HungWindowFromGhostWindow) (IN HWND GhostWindowHandle);
 
-_NtSuspendProcess NtSuspendProcess;
-_NtResumeProcess NtResumeProcess;
-_HungWindowFromGhostWindow HungWindowFromGhostWindow;
+extern _NtSuspendProcess NtSuspendProcess;
+extern _NtResumeProcess NtResumeProcess;
+extern _HungWindowFromGhostWindow HungWindowFromGhostWindow;
 
-#define PRIFILE_ID_BOSS 1000
-#define PROFILE_ID_CURRENT 1001
-
-#define MAX_PROFILES 10
+#define MAX_PROFILES 20
 #define MAX_PROCESSES_PER_PROFILE 40
 #define MAX_NAME 128
 
@@ -39,12 +36,6 @@ typedef struct _CONFIG
 {
 	BOOL Debug;
 	BOOL TrayIcon;
-
-	u32 BossHotKey;
-	UINT BossHotKeyModifiers;
-
-	wchar_t BossSections[MAX_PROFILES][128];
-	int NumBossSections;
 } CONFIG;
 
 typedef struct _PROFILE_CONFIG
@@ -57,6 +48,7 @@ typedef struct _PROFILE_CONFIG
 	BOOL MinimizeEnabled;
 
 	wchar_t ProgramExeName[MAX_NAME];
+	wchar_t ProgramPath[MAX_PATH];
 	u32 ProcessID;
 
 	wchar_t WindowNames[MAX_PROCESSES_PER_PROFILE][MAX_NAME];
@@ -72,4 +64,7 @@ typedef struct _PROFILE_CONFIG
 void MsgBox(const wchar_t* Message, const wchar_t* Caption, u32 Flags, ...);
 void DbgPrint(const wchar_t* Message, ...);
 LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARAM WParam, _In_ LPARAM LParam);
-void HandleKeyboardHotkey(int hkID);
+
+extern CONFIG gConfig;
+extern PROFILE_CONFIG gProfiles[MAX_PROFILES];
+extern int gNumProfiles;

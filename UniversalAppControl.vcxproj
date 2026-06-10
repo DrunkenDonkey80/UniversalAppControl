@@ -147,11 +147,22 @@
   <ItemGroup>
     <ClCompile Include="keys.c" />
     <ClCompile Include="Main.c" />
+    <ClCompile Include="config.c" />
+    <ClCompile Include="worker.c" />
+    <ClCompile Include="settings_ui.c" />
+    <ClCompile Include="install.c" />
+    <ClCompile Include="selftest.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="keys.h" />
     <ClInclude Include="Main.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="ui_ids.h" />
+    <ClInclude Include="config.h" />
+    <ClInclude Include="worker.h" />
+    <ClInclude Include="settings_ui.h" />
+    <ClInclude Include="install.h" />
+    <ClInclude Include="selftest.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="UniversalAppControl.rc" />

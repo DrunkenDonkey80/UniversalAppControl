@@ -10,10 +10,18 @@
 #include <Windows.h>
 #include <stdio.h>
 #include <TlHelp32.h>
+#include <winternl.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include "Main.h"
 #include "resource.h"
 #include "keys.h"
+#include "ui_ids.h"
+#include "config.h"
+#include "worker.h"
+#include "settings_ui.h"
+#include "install.h"
+#include "selftest.h"
 
 CONFIG gConfig;
 
@@ -109,7 +117,7 @@ static void ReadConfigList(const wchar_t* section, const wchar_t* variable, wcha
 
 static void RegisterConfigHotkey(const wchar_t* section, const wchar_t* variable, int profileID) {
 	u32 hotKey = 0;
-	UINT modifiers = MOD_NOREPEAT;
+	UINT modifiers = 0;
 
 	// Maximum buffer size for section names
 	wchar_t buffer[256] = { 0 };
@@ -124,13 +132,13 @@ static void RegisterConfigHotkey(const wchar_t* section, const wchar_t* variable
 	//walk through
 	wchar_t* b = buffer;
 	while (*b) {
-		if (!lstrcmpi(buffer, L"shift") || !lstrcmpi(buffer, L"lshift") || !lstrcmpi(buffer, L"rshift"))
+		if (!lstrcmpi(b, L"shift") || !lstrcmpi(b, L"lshift") || !lstrcmpi(b, L"rshift"))
 			modifiers |= MOD_SHIFT;
-		else if (!lstrcmpi(buffer, L"alt") || !lstrcmpi(buffer, L"lalt") || !lstrcmpi(buffer, L"ralt"))
+		else if (!lstrcmpi(b, L"alt") || !lstrcmpi(b, L"lalt") || !lstrcmpi(b, L"ralt"))
 			modifiers |= MOD_ALT;
-		else if (!lstrcmpi(buffer, L"ctrl") || !lstrcmpi(buffer, L"lctrl") || !lstrcmpi(buffer, L"rctrl") || !lstrcmpi(buffer, L"control") || !lstrcmpi(buffer, L"lcontrol") || !lstrcmpi(buffer, L"rcontrol"))
+		else if (!lstrcmpi(b, L"ctrl") || !lstrcmpi(b, L"lctrl") || !lstrcmpi(b, L"rctrl") || !lstrcmpi(b, L"control") || !lstrcmpi(b, L"lcontrol") || !lstrcmpi(b, L"rcontrol"))
 			modifiers |= MOD_CONTROL;
-		else if (!lstrcmpi(buffer, L"win") || !lstrcmpi(buffer, L"window") || !lstrcmpi(buffer, L"windows"))
+		else if (!lstrcmpi(b, L"win") || !lstrcmpi(b, L"window") || !lstrcmpi(b, L"windows"))
 			modifiers |= MOD_WIN;
 		else {
 			KEYCode* key = findKeyWithName(b);
@@ -159,10 +167,10 @@ static void RegisterConfigHotkey(const wchar_t* section, const wchar_t* variable
 			gHotkeys[gNumHotkeys].NumProfileIDs = 0;
 			gHotkeys[gNumHotkeys].ProfileIDs[gHotkeys[gNumHotkeys].NumProfileIDs++] = profileID;
 
-			if (RegisterHotKey(NULL, gNumHotkeys, modifiers, hotKey) == 0)
-			{
-				MsgBox(L"Failed to register hotkey! Error 0x%08lx", APPNAME L" Error", MB_OK | MB_ICONERROR, GetLastError());
-			}
+			//if (RegisterHotKey(NULL, gNumHotkeys, MOD_NOREPEAT | modifiers, hotKey) == 0)
+			//{
+			//	MsgBox(L"Failed to register hotkey! Error 0x%08lx", APPNAME L" Error", MB_OK | MB_ICONERROR, GetLastError());
+			//}
 			gNumHotkeys++;
 		}
 	}
@@ -269,14 +277,62 @@ const wchar_t* GetLastErorText() {
 	return messageBuffer;
 }
 
+bool IsProcessSuspended(DWORD processId) {
+	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	if (hSnapshot == INVALID_HANDLE_VALUE) {
+		//std::cerr << "Failed to create snapshot." << std::endl;
+		return false;
+	}
+
+	THREADENTRY32 threadEntry;
+	threadEntry.dwSize = sizeof(THREADENTRY32);
+	bool isSuspended = true;  // Assume process is suspended unless proven otherwise
+
+	if (Thread32First(hSnapshot, &threadEntry)) {
+		do {
+			if (threadEntry.th32OwnerProcessID == processId) {
+				// Open the thread
+				HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION| THREAD_SUSPEND_RESUME, FALSE, threadEntry.th32ThreadID);
+				if (hThread) {
+					// Get the thread's suspend count
+					DWORD suspendCount = SuspendThread(hThread);
+					ResumeThread(hThread); // Undo the suspend caused by SuspendThread
+
+					if (suspendCount == 0) {
+						isSuspended = false; // At least one thread is not suspended
+					}
+					CloseHandle(hThread);
+				}
+			}
+		} while (Thread32Next(hSnapshot, &threadEntry) && isSuspended);
+	}
+	else {
+		//std::cerr << "Failed to retrieve thread information." << std::endl;
+	}
+
+	CloseHandle(hSnapshot);
+	return isSuspended;
+}
 
 bool SuspendProcess(u32 id) {
+	//do not suspend if already suspended
+	if (IsProcessSuspended(id)) {
+		return;
+	}
+
 	HANDLE ProcessHandle = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, id);
 	if (ProcessHandle == NULL)
 	{
 		MsgBox(L"Failed to open process %d! Error 0x%08lx", APPNAME L" Error", MB_OK | MB_ICONERROR, id, GetLastError());
 		return false;
 	}
+
+	//u8 buf[0x1000];
+	//ULONG cb = sizeof(buf);
+	//SYSTEM_INFORMATION_CLASS sysInfo;
+	//if (NtQuerySystemInformation(SystemProcessInformation, buf, cb, &cb) == 0)
+	//{
+	//}
 	NtSuspendProcess(ProcessHandle);
 	gPausedProcesses[gNumPausedProcesses++] = id;
 	CloseHandle(ProcessHandle);
@@ -315,11 +371,14 @@ static BOOL CALLBACK enumWindowCallback(HWND hWnd, LPARAM lparam) {
 	if (gNumWindowInfo >= MAX_WINDOW_INFO)
 		return FALSE;
 
-	gWindowInfo[gNumWindowInfo].WindowHandle = hWnd;
-	gWindowInfo[gNumWindowInfo].ProcessID = 0;
-	GetWindowThreadProcessId(hWnd, &gWindowInfo[gNumWindowInfo].ProcessID);
+	if (GetWindow(hWnd, GW_OWNER) == NULL)
+	{
+		gWindowInfo[gNumWindowInfo].WindowHandle = hWnd;
+		gWindowInfo[gNumWindowInfo].ProcessID = 0;
+		GetWindowThreadProcessId(hWnd, &gWindowInfo[gNumWindowInfo].ProcessID);
 
-	gNumWindowInfo++;
+		gNumWindowInfo++;
+	}
 
 	return TRUE;
 }
@@ -358,7 +417,10 @@ void UpdateProcessIDs() {
 	{
 		//walk over each profiles to fill in revelant processid info
 		for (int i = 0; i < gNumProfiles; i++) {
-			if (_wcsicmp(ProcessEntry.szExeFile, gProfiles[i].ProgramExeName) == 0) {
+			bool found = _wcsicmp(ProcessEntry.szExeFile, gProfiles[i].ProgramExeName) == 0;
+			//DbgPrint(L"Found process %s, comparing to %s: %d", ProcessEntry.szExeFile, gProfiles[i].ProgramExeName, found);
+			if (found) {
+				DbgPrint(L"Found process %s, comparing to %s: %d", ProcessEntry.szExeFile, gProfiles[i].ProgramExeName, found);
 				gProfiles[i].ProcessID = ProcessEntry.th32ProcessID;
 			}
 		}
@@ -473,10 +535,24 @@ bool RestoreWindow(HWND hWnd, bool hide, bool minimise) {
 bool RestoreWindowsForPofile(int profileId) {
 	bool windowChanged = false;
 
+	//special case of no hidden windows when the program gets restarted - try to restore them all
+	if (gProfiles[profileId].NumHiddenWindows == 0) {
+		if (gProfiles[profileId].ProcessID != 0 && gProfiles[profileId].HideEnabled) {
+			for (int i = 0; i < gNumWindowInfo; i++) {
+				if (gWindowInfo[i].ProcessID == gProfiles[profileId].ProcessID) {
+					gProfiles[profileId].HiddenWindows[gProfiles[profileId].NumHiddenWindows++] = gWindowInfo[i].WindowHandle;
+				}
+			}
+		}
+	}
+
 	for (int i = 0; i < gProfiles[profileId].NumHiddenWindows; i++) {
 		if (RestoreWindow(gProfiles[profileId].HiddenWindows[i], gProfiles[profileId].HideEnabled, gProfiles[profileId].MinimizeEnabled)) {
 			if (gProfiles[profileId].ForegroundWindow == gProfiles[profileId].HiddenWindows[i]) {
-				SetForegroundWindow(gProfiles[profileId].ForegroundWindow);
+				HWND active = gProfiles[profileId].ForegroundWindow != 0 ? gProfiles[profileId].ForegroundWindow : gProfiles[profileId].HiddenWindows[0];
+				SetForegroundWindow(active);
+				SetActiveWindow(active);
+				SetFocus(active);
 			}
 			windowChanged = true;
 		}
@@ -514,7 +590,7 @@ void HandleProfile(int profileId, bool trigger) {
 			if (gProfiles[profileId].ProcessID != 0) {
 				if (windowChanged) {
 					//give it some time to react before pausing
-					Sleep(100);
+					Sleep(10);
 					windowChanged = false;
 				}
 
@@ -524,25 +600,24 @@ void HandleProfile(int profileId, bool trigger) {
 	}
 	else {
 		//order is - unpause / show / restore here, processes first, windows last
-		bool processAwoken = false;
-		if (gProfiles[profileId].PauseEnabled) {
-			if (gProfiles[profileId].ProcessID != 0) {
+		if (gProfiles[profileId].ProcessID != 0) {
+			bool processAwoken = false;
+			if (gProfiles[profileId].PauseEnabled) {
 				ResumeProcess(gProfiles[profileId].ProcessID);
 				processAwoken = true;
 			}
-		}
-		if (processAwoken) {
-			//give it some time to react
-			Sleep(100);
-		}
+			if (processAwoken) {
+				//give it some time to react
+				Sleep(10);
+			}
 
-		RestoreWindowsForPofile(profileId);
+			RestoreWindowsForPofile(profileId);
+		}
 	}
 }
 
 void HandleKeyboardHotkey(int hkID)
 {
-
 	UpdateProcessIDs();
 	UpdateWindowProcessIDs();
 
@@ -605,6 +680,57 @@ void DbgPrint(const wchar_t* Message, ...)
 	WriteConsoleW(gDbgConsole, FormattedMessage, (u32)wcslen(FormattedMessage), NULL, NULL);	
 }
 
+LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+	if (nCode == HC_ACTION) {
+		KBDLLHOOKSTRUCT* pKeyboard = (KBDLLHOOKSTRUCT*)lParam;
+
+ 		if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN || wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+			bool down = wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN;
+
+			//DbgPrint(L"Key Pressed: %d enter\n", pKeyboard->vkCode);
+
+			WORD vkCode = pKeyboard->vkCode;                           // virtual-key code
+
+			WORD keyFlags = pKeyboard->flags;
+
+			//WORD scanCode = LOBYTE(keyFlags);                             // scan code
+			//BOOL isExtendedKey = (keyFlags & KF_EXTENDED) == KF_EXTENDED; // extended-key flag, 1 if scancode has 0xE0 prefix
+
+			//if (isExtendedKey)
+			//	scanCode = MAKEWORD(scanCode, 0xE0);
+
+			BOOL wasKeyDown = (keyFlags & KF_REPEAT) == KF_REPEAT;        // previous key-state flag, 1 on autorepeat
+			//WORD repeatCount = LOWORD(lParam);                            // repeat count, > 0 if several keydown messages was combined into one message
+
+			BOOL isKeyReleased = (keyFlags & KF_UP) == KF_UP;             // transition-state flag, 1 on keyup
+
+			DWORD32 t = GetTickCount();
+			DbgPrint(L"Key %s: wasDown:%d, released: %d Enter\n", down ? L"pressed" : L"released", wasKeyDown, isKeyReleased);
+
+
+			//search for hotkey for that VK
+			for (int i = 0; i < gNumHotkeys; i++) {
+				if (gHotkeys[i].HotKey == vkCode) {
+					BOOL shift = GetKeyState(VK_SHIFT) & 0x8000;
+					BOOL ctrl = GetKeyState(VK_CONTROL) & 0x8000;
+					BOOL alt = GetKeyState(VK_MENU) & 0x8000;
+
+					u32 modifiers = (shift ? MOD_SHIFT : 0) | (ctrl ? MOD_CONTROL : 0) | (alt ? MOD_ALT : 0);
+					if (gHotkeys[i].Modifiers == modifiers) {
+						if (down && !wasKeyDown)
+							HandleKeyboardHotkey(i);
+						return 1;
+					}
+				}
+			}
+			DbgPrint(L"Key %s: wasDown:%d, released: %d Exit, time taken: %d\n", down ? L"pressed" : L"released", wasKeyDown, isKeyReleased, (GetTickCount() - t));
+		}
+	}
+
+	// Pass the hook information to the next hook procedure in the current hook chain
+	return CallNextHookEx(NULL, nCode, wParam, lParam);
+}
+
 LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARAM WParam, _In_ LPARAM LParam)
 {
 	LRESULT Result = 0;
@@ -641,9 +767,16 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 
 int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _In_ PWSTR CmdLine, _In_ int CmdShow)
 {
+	for (int ai = 1; ai < __argc; ai++) {
+		if (lstrcmpiW(__wargv[ai], L"--selftest") == 0)
+			return RunSelfTests();
+	}
+
 	UNREFERENCED_PARAMETER(PrevInstance);
 	UNREFERENCED_PARAMETER(CmdLine);
 	UNREFERENCED_PARAMETER(CmdShow);
+
+	HHOOK hHook = NULL;
 
 	HMODULE NtDll = NULL;
 	MSG WndMsg = { 0 };
@@ -676,6 +809,13 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	{
 		MsgBox(L"Unable to locate the NtResumeProcess procedure in the ntdll.dll module!", APPNAME L" Error", MB_OK | MB_ICONERROR);
 		goto Exit;
+	}
+
+	hHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, NULL, 0);
+
+	if (hHook == NULL) {
+		printf("Failed to install hook!\n");
+		return 1;
 	}
 
 	// There will be no visible window either way, but in one case, there will be a system tray icon,
@@ -767,5 +907,9 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	}
 
 Exit:
+	// Unhook the hook before exiting
+	if(hHook != NULL)
+		UnhookWindowsHookEx(hHook);
+
 	return(0);
 }

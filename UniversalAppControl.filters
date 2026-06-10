@@ -24,6 +24,24 @@
     <ClInclude Include="keys.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ui_ids.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="config.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="worker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="settings_ui.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="install.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="selftest.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="UniversalAppControl.rc">
@@ -40,6 +58,21 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="keys.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="config.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="worker.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="settings_ui.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="install.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="selftest.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

@@ -717,7 +717,6 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARAM WParam, _In_ LPARAM LParam)
 {
 	LRESULT Result = 0;
-	static BOOL QuitMessageBoxIsShowing = FALSE;
 
 	if (Message == gTaskbarCreatedMsg && gTaskbarCreatedMsg != 0) {
 		Shell_NotifyIconW(NIM_ADD, &gTrayNotifyIconData);
@@ -728,19 +727,39 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 	{
 		case WM_TRAYICON:
 		{
-			if (!QuitMessageBoxIsShowing && (LParam == WM_LBUTTONDOWN || LParam == WM_RBUTTONDOWN || LParam == WM_MBUTTONDOWN))
-			{
-				QuitMessageBoxIsShowing = TRUE;
-				if (MessageBox(Window, L"Quit " APPNAME L"?", L"Are you sure?", MB_YESNO | MB_ICONQUESTION | MB_SYSTEMMODAL) == IDYES)
-				{
+			if (LParam == WM_LBUTTONUP || LParam == WM_LBUTTONDBLCLK) {
+				ShowSettingsWindow(GetModuleHandleW(NULL), Window);
+				break;
+			}
+			if (LParam == WM_RBUTTONUP) {
+				HMENU menu = CreatePopupMenu();
+				AppendMenuW(menu, MF_STRING, IDM_SETTINGS, L"Settings...");
+				AppendMenuW(menu, MF_STRING | (IsStartupEnabled() ? MF_CHECKED : 0),
+				            IDM_STARTUP, L"Run at Windows startup");
+				AppendMenuW(menu, MF_STRING, IDM_INSTALL, L"Install to user programs...");
+				AppendMenuW(menu, MF_STRING, IDM_OPENINI, L"Open INI folder");
+				AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+				AppendMenuW(menu, MF_STRING, IDM_QUIT, L"Quit");
+
+				POINT pt; GetCursorPos(&pt);
+				SetForegroundWindow(Window);
+				TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, Window, NULL);
+				DestroyMenu(menu);
+			}
+			break;
+		}
+		case WM_COMMAND:
+		{
+			switch (LOWORD(WParam)) {
+				case IDM_SETTINGS: ShowSettingsWindow(GetModuleHandleW(NULL), Window); break;
+				case IDM_STARTUP:  SetStartupEnabled(!IsStartupEnabled()); break;
+				case IDM_INSTALL:  InstallToUserPrograms(Window); break;
+				case IDM_OPENINI:  OpenConfigFolder(); break;
+				case IDM_QUIT:
 					Shell_NotifyIconW(NIM_DELETE, &gTrayNotifyIconData);
 					gIsRunning = FALSE;
 					PostQuitMessage(0);
-				}
-				else
-				{
-					QuitMessageBoxIsShowing = FALSE;
-				}
+					break;
 			}
 			break;
 		}

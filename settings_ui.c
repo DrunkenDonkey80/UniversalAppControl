@@ -5,7 +5,10 @@
 #include "install.h"
 #include "worker.h"
 #include <commctrl.h>
+#include <shlwapi.h>
+#pragma comment(lib, "Shlwapi.lib")
 #include <string.h>
+#include <stdio.h>
 #pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Gdi32.lib")
@@ -27,7 +30,8 @@ static void RefreshList(HWND wnd) {
         wchar_t hk[64];
         FormatHotkey(gProfiles[i].HotKey, gProfiles[i].HotKeyModifiers, hk, _countof(hk));
         ListView_SetItemText(list, i, 1, hk);
-        ListView_SetItemText(list, i, 2, L"");   // status filled in Task 16
+        ListView_SetItemText(list, i, 2,
+            IsExeRunning(gProfiles[i].ProgramExeName) ? L"run" : L"off");
     }
     CheckDlgButton(wnd, IDC_STARTUP, IsStartupEnabled() ? BST_CHECKED : BST_UNCHECKED);
 }
@@ -46,6 +50,15 @@ static void LoadSelectionToFields(HWND wnd, int idx) {
     PROFILE_CONFIG* p = &gProfiles[idx];
     SetDlgItemTextW(wnd, IDC_NAME, p->ProgramExeName);
     SetDlgItemTextW(wnd, IDC_PATH, p->ProgramPath);
+    {
+        wchar_t status[128];
+        bool running = IsExeRunning(p->ProgramExeName);
+        bool present = p->ProgramPath[0] ? (PathFileExistsW(p->ProgramPath) != FALSE) : true;
+        swprintf_s(status, _countof(status), L"%s   %s",
+            running ? L"\x25CF running" : L"\x25CB not running",
+            p->ProgramPath[0] ? (present ? L"| file present" : L"| FILE MISSING") : L"");
+        SetDlgItemTextW(wnd, IDC_STATUS, status);
+    }
     wchar_t hk[64]; FormatHotkey(p->HotKey, p->HotKeyModifiers, hk, _countof(hk));
     SetDlgItemTextW(wnd, IDC_HOTKEY, hk);
     CheckDlgButton(wnd, IDC_HIDE,  p->HideEnabled  ? BST_CHECKED : BST_UNCHECKED);

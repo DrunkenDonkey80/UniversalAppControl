@@ -3,6 +3,7 @@
 #include "config.h"
 #include <shlobj.h>
 #include <stdio.h>
+#include <tlhelp32.h>
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "Shlwapi.lib")
@@ -48,4 +49,18 @@ bool InstallToUserPrograms(HWND parent) {
     // Implemented in Task 21
     (void)parent;
     return false;
+}
+
+bool IsExeRunning(const wchar_t* exeName) {
+    if (!exeName || !exeName[0]) return false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do { if (_wcsicmp(pe.szExeFile, exeName) == 0) { found = true; break; } }
+        while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
 }

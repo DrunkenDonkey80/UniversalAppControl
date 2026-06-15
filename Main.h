@@ -35,7 +35,6 @@ extern _HungWindowFromGhostWindow HungWindowFromGhostWindow;
 typedef struct _CONFIG
 {
 	BOOL Debug;
-	BOOL TrayIcon;
 } CONFIG;
 
 typedef struct _PROFILE_CONFIG
@@ -69,9 +68,11 @@ extern CONFIG gConfig;
 extern PROFILE_CONFIG gProfiles[MAX_PROFILES];
 extern int gNumProfiles;
 extern BOOL gIsRunning;
+extern HANDLE gMutex;
 extern NOTIFYICONDATA gTrayNotifyIconData;
 bool LoadConfig(void);
 
 extern CRITICAL_SECTION gHotkeyLock;   // guards gHotkeys/gNumHotkeys + Triggered
 void DispatchHotkey(int hotkeyIndex);  // worker-side: runs the heavy toggle work
+void RebuildHotkeys(void);             // rebuild gHotkeys from in-memory gProfiles; caller holds gHotkeyLock
 const wchar_t* GetExePath(void);

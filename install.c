@@ -3,6 +3,7 @@
 #include "config.h"
 #include <initguid.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #include <objbase.h>
 #include <stdio.h>
 #include <tlhelp32.h>
@@ -44,9 +45,14 @@ bool SetStartupEnabled(bool enabled) {
 }
 
 void OpenConfigFolder(void) {
-    wchar_t arg[MAX_PATH + 16];
-    swprintf_s(arg, _countof(arg), L"/select,\"%s\"", GetConfigPath());
-    ShellExecuteW(NULL, L"open", L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
+    const wchar_t* path = GetConfigPath();
+    if (PathFileExistsW(path)) {
+        wchar_t arg[MAX_PATH + 16];
+        swprintf_s(arg, _countof(arg), L"/select,\"%s\"", path);
+        ShellExecuteW(NULL, L"open", L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
+    } else {
+        ShellExecuteW(NULL, L"open", L"explorer.exe", GetConfigDir(), NULL, SW_SHOWNORMAL);
+    }
 }
 
 bool IsExeRunning(const wchar_t* exeName) {
@@ -102,6 +108,40 @@ static bool CreateStartMenuShortcut(const wchar_t* target) {
     return ok;
 }
 
+void FixStartupPathIfStale(void) {
+    HKEY hk;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_READ, &hk) != ERROR_SUCCESS)
+        return;
+    wchar_t buf[MAX_PATH + 32]; DWORD cb = sizeof(buf); DWORD type = 0;
+    LSTATUS s = RegQueryValueExW(hk, RUN_NAME, NULL, &type, (LPBYTE)buf, &cb);
+    RegCloseKey(hk);
+    if (s != ERROR_SUCCESS || type != REG_SZ) return;
+    DWORD nchars = cb / sizeof(wchar_t);
+    if (nchars >= (DWORD)_countof(buf)) nchars = (DWORD)_countof(buf) - 1;
+    buf[nchars] = L'\0';
+
+    wchar_t regPath[MAX_PATH] = {0};
+    if (buf[0] == L'"') {
+        wchar_t* end = wcschr(buf + 1, L'"');
+        if (!end) return;
+        size_t len = (size_t)(end - (buf + 1));
+        if (len >= MAX_PATH) return;
+        wcsncpy_s(regPath, MAX_PATH, buf + 1, len);
+    } else {
+        wchar_t* sp = wcschr(buf, L' ');
+        if (sp) {
+            size_t len = (size_t)(sp - buf);
+            if (len >= MAX_PATH) return;
+            wcsncpy_s(regPath, MAX_PATH, buf, len);
+        } else {
+            wcscpy_s(regPath, MAX_PATH, buf);
+        }
+    }
+
+    if (_wcsicmp(regPath, GetExePath()) != 0)
+        SetStartupEnabled(true);
+}
+
 bool InstallToUserPrograms(HWND parent) {
     wchar_t dir[MAX_PATH]; GetInstallDir(dir, MAX_PATH);
     SHCreateDirectoryExW(NULL, dir, NULL);
@@ -112,7 +152,10 @@ bool InstallToUserPrograms(HWND parent) {
         return false;
     }
 
-    GetConfigPath();   // ensures %APPDATA%\UniversalAppControl\ dir exists
+    // Copy INI so the installed instance finds its config (tray icon, profiles, etc.)
+    wchar_t iniDst[MAX_PATH];
+    swprintf_s(iniDst, _countof(iniDst), L"%s\\UniversalAppControl.ini", dir);
+    CopyFileW(GetConfigPath(), iniDst, FALSE);
 
     if (!CreateStartMenuShortcut(dst))
         MessageBoxW(parent, L"Copied, but the Start Menu shortcut could not be created.",
@@ -131,8 +174,13 @@ bool InstallToUserPrograms(HWND parent) {
         }
     }
 
-    // Relaunch installed copy, then quit this instance.
-    ShellExecuteW(NULL, L"open", dst, NULL, NULL, SW_SHOWNORMAL);
+    // Release the mutex before launching so the new instance doesn't see ERROR_ALREADY_EXISTS.
+    if (gMutex) { CloseHandle(gMutex); gMutex = NULL; }
+
+    if ((INT_PTR)ShellExecuteW(NULL, L"open", dst, NULL, NULL, SW_SHOWNORMAL) <= 32) {
+        MessageBoxW(parent, L"Failed to launch the installed copy.", L"Install", MB_OK | MB_ICONERROR);
+        return false;
+    }
     Shell_NotifyIconW(NIM_DELETE, &gTrayNotifyIconData);
     gIsRunning = FALSE;
     PostQuitMessage(0);

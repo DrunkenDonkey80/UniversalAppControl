@@ -1,6 +1,7 @@
 #include "settings_ui.h"
 #include "ui_ids.h"
 #include "Main.h"
+#include "resource.h"
 #include "config.h"
 #include "install.h"
 #include "worker.h"
@@ -10,12 +11,108 @@
 #include <tlhelp32.h>
 #include <shellapi.h>
 #pragma comment(lib, "Shell32.lib")
+#include <uxtheme.h>
+#pragma comment(lib, "UxTheme.lib")
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Gdi32.lib")
 
+// ---- Theme palette ----
+#define C_BG       RGB(243, 244, 248)
+#define C_SURFACE  RGB(255, 255, 255)
+#define C_BORDER   RGB(209, 213, 219)
+#define C_ACCENT   RGB(37,   99, 235)
+#define C_ACCENTDK RGB(29,   78, 216)
+#define C_TEXT     RGB(17,   24,  39)
+#define C_SUBTEXT  RGB(107, 114, 128)
+#define C_RUN_OK   RGB(22,  163,  74)
+#define C_RUN_OFF  RGB(156, 163, 175)
+#define C_DANGER   RGB(220,  38,  38)
+#define C_DANGERDK RGB(185,  28,  28)
+
+static HFONT  gUiFont  = NULL;
+static HBRUSH gBrBg    = NULL;
+static HBRUSH gBrSurf  = NULL;
+
+static void InitTheme(void) {
+    if (gUiFont) return;
+    LOGFONTW lf = { 0 };
+    lf.lfHeight  = -MulDiv(10, GetDeviceCaps(GetDC(NULL), LOGPIXELSY), 72);
+    lf.lfWeight  = FW_NORMAL;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    wcscpy_s(lf.lfFaceName, _countof(lf.lfFaceName), L"Segoe UI");
+    gUiFont = CreateFontIndirectW(&lf);
+    gBrBg   = CreateSolidBrush(C_BG);
+    gBrSurf = CreateSolidBrush(C_SURFACE);
+}
+
+static BOOL CALLBACK ApplyFontEnum(HWND child, LPARAM lp) {
+    SendMessageW(child, WM_SETFONT, (WPARAM)lp, FALSE);
+    return TRUE;
+}
+
+// ---- Owner-draw button helper ----
+static void DrawThemedButton(DRAWITEMSTRUCT* di) {
+    int id = GetDlgCtrlID(di->hwndItem);
+    BOOL pressed  = (di->itemState & ODS_SELECTED) != 0;
+    BOOL disabled = (di->itemState & ODS_DISABLED)  != 0;
+
+    COLORREF bg, bgdk;
+    if (disabled) {
+        bg = bgdk = C_SUBTEXT;
+    } else if (id == IDC_REMOVE) {
+        bg = C_DANGER; bgdk = C_DANGERDK;
+    } else {
+        bg = C_ACCENT; bgdk = C_ACCENTDK;
+    }
+    COLORREF fill = pressed ? bgdk : bg;
+
+    HBRUSH br = CreateSolidBrush(fill);
+    FillRect(di->hDC, &di->rcItem, br);
+    DeleteObject(br);
+
+    SetTextColor(di->hDC, RGB(255, 255, 255));
+    SetBkMode(di->hDC, TRANSPARENT);
+    HFONT prev = (HFONT)SelectObject(di->hDC, gUiFont);
+    wchar_t txt[128];
+    GetWindowTextW(di->hwndItem, txt, _countof(txt));
+    DrawTextW(di->hDC, txt, -1, &di->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(di->hDC, prev);
+
+    if ((di->itemState & ODS_FOCUS) && !pressed) {
+        RECT fr = di->rcItem;
+        InflateRect(&fr, -3, -3);
+        DrawFocusRect(di->hDC, &fr);
+    }
+}
+
+// ---- Common color messages (shared by both WndProcs) ----
+static LRESULT HandleCtlColor(UINT msg, WPARAM wp, LPARAM lp) {
+    HDC hdc = (HDC)wp;
+    if (msg == WM_CTLCOLOREDIT) {
+        SetTextColor(hdc, C_TEXT);
+        SetBkColor(hdc, C_SURFACE);
+        return (LRESULT)gBrSurf;
+    }
+    // WM_CTLCOLORSTATIC and WM_CTLCOLORBTN
+    HWND ctrl = (HWND)lp;
+    int  id   = GetDlgCtrlID(ctrl);
+    SetBkColor(hdc, C_BG);
+    if (id == IDC_STATUS) {
+        wchar_t t[128]; GetWindowTextW(ctrl, t, _countof(t));
+        SetTextColor(hdc, wcsstr(t, L"\x25CF") ? C_RUN_OK : C_SUBTEXT);
+    } else if (id == IDC_PATH) {
+        SetTextColor(hdc, C_SUBTEXT);
+    } else {
+        SetTextColor(hdc, C_TEXT);
+    }
+    return (LRESULT)gBrBg;
+}
+
+// ---- Settings window ----
 HWND gSettingsWnd = NULL;
 static int gSelected = -1;
 
@@ -36,17 +133,22 @@ static void RefreshList(HWND wnd) {
         ListView_SetItemText(list, i, 2,
             IsExeRunning(gProfiles[i].ProgramExeName) ? L"run" : L"off");
     }
+    if (gSelected >= 0 && gSelected < gNumProfiles) {
+        ListView_SetItemState(list, gSelected, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(list, gSelected, FALSE);
+    }
     CheckDlgButton(wnd, IDC_STARTUP, IsStartupEnabled() ? BST_CHECKED : BST_UNCHECKED);
 }
 
 static void LoadSelectionToFields(HWND wnd, int idx) {
     gSelected = idx;
     if (idx < 0 || idx >= gNumProfiles) {
-        SetDlgItemTextW(wnd, IDC_NAME, L"");
-        SetDlgItemTextW(wnd, IDC_PATH, L"");
+        SetDlgItemTextW(wnd, IDC_NAME,   L"");
+        SetDlgItemTextW(wnd, IDC_PATH,   L"");
         SetDlgItemTextW(wnd, IDC_HOTKEY, L"");
-        CheckDlgButton(wnd, IDC_HIDE, BST_UNCHECKED);
-        CheckDlgButton(wnd, IDC_MIN, BST_UNCHECKED);
+        SetDlgItemTextW(wnd, IDC_STATUS, L"");
+        CheckDlgButton(wnd, IDC_HIDE,  BST_UNCHECKED);
+        CheckDlgButton(wnd, IDC_MIN,   BST_UNCHECKED);
         CheckDlgButton(wnd, IDC_PAUSE, BST_UNCHECKED);
         return;
     }
@@ -64,9 +166,9 @@ static void LoadSelectionToFields(HWND wnd, int idx) {
     }
     wchar_t hk[64]; FormatHotkey(p->HotKey, p->HotKeyModifiers, hk, _countof(hk));
     SetDlgItemTextW(wnd, IDC_HOTKEY, hk);
-    CheckDlgButton(wnd, IDC_HIDE,  p->HideEnabled  ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(wnd, IDC_MIN,   p->MinimizeEnabled ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(wnd, IDC_PAUSE, p->PauseEnabled ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(wnd, IDC_HIDE,  p->HideEnabled     ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(wnd, IDC_MIN,   p->MinimizeEnabled  ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(wnd, IDC_PAUSE, p->PauseEnabled     ? BST_CHECKED : BST_UNCHECKED);
 }
 
 static HWND MakeChild(HWND parent, const wchar_t* cls, const wchar_t* text,
@@ -75,59 +177,106 @@ static HWND MakeChild(HWND parent, const wchar_t* cls, const wchar_t* text,
         x, y, w, h, parent, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
 }
 
+static HWND MakeBtn(HWND parent, const wchar_t* text, int x, int y, int w, int h, int id) {
+    return MakeChild(parent, L"BUTTON", text, BS_OWNERDRAW, x, y, w, h, id);
+}
+
+// ---- Hotkey edit subclass: captures key combos and formats them as text ----
+static LRESULT CALLBACK HotkeyEditSubclass(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp,
+                                            UINT_PTR subId, DWORD_PTR refData) {
+    (void)subId; (void)refData;
+    switch (msg) {
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN: {
+            WORD vk = (WORD)wp;
+            if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU ||
+                vk == VK_LWIN  || vk == VK_RWIN)
+                return 0;
+            if (vk == VK_TAB || vk == VK_ESCAPE)
+                return DefSubclassProc(hWnd, msg, wp, lp);
+            if (vk == VK_BACK || vk == VK_DELETE) {
+                SetWindowTextW(hWnd, L"");
+                return 0;
+            }
+            BOOL shift = GetKeyState(VK_SHIFT)   & 0x8000;
+            BOOL ctrl  = GetKeyState(VK_CONTROL) & 0x8000;
+            BOOL alt   = GetKeyState(VK_MENU)    & 0x8000;
+            UINT mods  = (shift ? MOD_SHIFT   : 0)
+                       | (ctrl  ? MOD_CONTROL : 0)
+                       | (alt   ? MOD_ALT     : 0);
+            wchar_t buf[64];
+            FormatHotkey((u32)vk, mods, buf, _countof(buf));
+            if (buf[0]) SetWindowTextW(hWnd, buf);
+            return 0;
+        }
+        case WM_CHAR:
+        case WM_SYSCHAR:
+            return 0;
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hWnd, HotkeyEditSubclass, 0);
+            break;
+    }
+    return DefSubclassProc(hWnd, msg, wp, lp);
+}
+
+// Layout constants
+#define M   16     // outer margin
+#define LW  300    // list width
+#define LH  374    // list height
+#define RX  330    // right panel left edge
+#define LBW  65    // label column width
+#define FX  399    // form field left edge (RX + LBW + 4)
+#define FW  243    // form field width
+#define RPW 312    // full right panel width (FX + FW - RX)
+
 static void CreateControls(HWND wnd) {
+    // --- List (left panel) ---
     HWND list = MakeChild(wnd, WC_LISTVIEWW, L"",
         LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER,
-        10, 10, 300, 360, IDC_LIST);
-    ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT);
+        M, M, LW, LH, IDC_LIST);
+    ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    SetWindowTheme(list, L"Explorer", NULL);
+    ListView_SetBkColor(list, C_SURFACE);
+    ListView_SetTextColor(list, C_TEXT);
+    ListView_SetTextBkColor(list, C_SURFACE);
     LVCOLUMNW c = { 0 }; c.mask = LVCF_TEXT | LVCF_WIDTH;
     c.pszText = L"Program"; c.cx = 150; ListView_InsertColumn(list, 0, &c);
     c.pszText = L"Hotkey";  c.cx = 90;  ListView_InsertColumn(list, 1, &c);
     c.pszText = L"Status";  c.cx = 55;  ListView_InsertColumn(list, 2, &c);
 
-    int rx = 325, lblW = 60, fx = rx + lblW, fw = 240;
-    MakeChild(wnd, L"STATIC", L"Name:",   SS_RIGHT, rx, 14, lblW, 20, 0);
-    MakeChild(wnd, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, fx, 12, fw, 22, IDC_NAME);
-    MakeChild(wnd, L"STATIC", L"Path:",   SS_RIGHT, rx, 44, lblW, 20, 0);
-    MakeChild(wnd, L"STATIC", L"",        SS_LEFTNOWORDWRAP, fx, 44, fw, 20, IDC_PATH);
-    MakeChild(wnd, L"STATIC", L"Hotkey:", SS_RIGHT, rx, 74, lblW, 20, 0);
-    MakeChild(wnd, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, fx, 72, fw, 22, IDC_HOTKEY);
+    MakeBtn(wnd, L"+ Add from running...", M,         M+LH+8, 145, 28, IDC_ADD);
+    MakeBtn(wnd, L"Remove",               M+145+6,    M+LH+8,  80, 28, IDC_REMOVE);
 
-    MakeChild(wnd, L"BUTTON", L"Hide / show",        BS_AUTOCHECKBOX, fx, 104, fw, 22, IDC_HIDE);
-    MakeChild(wnd, L"BUTTON", L"Minimize / restore",  BS_AUTOCHECKBOX, fx, 128, fw, 22, IDC_MIN);
-    MakeChild(wnd, L"BUTTON", L"Pause / resume",      BS_AUTOCHECKBOX, fx, 152, fw, 22, IDC_PAUSE);
+    // --- Right panel: form fields ---
+    int ry = M;
+    MakeChild(wnd, L"STATIC", L"Name:",   SS_RIGHT, RX, ry+4,  LBW, 20, 0);
+    MakeChild(wnd, L"EDIT",   L"",        WS_BORDER|ES_AUTOHSCROLL, FX, ry, FW, 26, IDC_NAME);
+    ry += 36;
 
-    MakeChild(wnd, L"STATIC", L"", SS_LEFTNOWORDWRAP, fx, 182, fw, 40, IDC_STATUS);
+    MakeChild(wnd, L"STATIC", L"Path:",   SS_RIGHT, RX, ry+2,  LBW, 20, 0);
+    MakeChild(wnd, L"STATIC", L"",        SS_LEFTNOWORDWRAP, FX, ry, FW, 34, IDC_PATH);
+    ry += 44;
 
-    MakeChild(wnd, L"BUTTON", L"+ Add from running...", BS_PUSHBUTTON,  10,  380, 150, 26, IDC_ADD);
-    MakeChild(wnd, L"BUTTON", L"Remove",                 BS_PUSHBUTTON, 168,  380,  80, 26, IDC_REMOVE);
-    MakeChild(wnd, L"BUTTON", L"Run at startup",         BS_AUTOCHECKBOX, 325, 384, 140, 22, IDC_STARTUP);
-    MakeChild(wnd, L"BUTTON", L"Open INI folder",        BS_PUSHBUTTON, 470,  380, 110, 26, IDC_OPENINI);
-    MakeChild(wnd, L"BUTTON", L"Install to user programs...", BS_PUSHBUTTON, 325, 412, 255, 26, IDC_INSTALL);
-}
+    MakeChild(wnd, L"STATIC", L"Hotkey:", SS_RIGHT, RX, ry+4, LBW, 20, 0);
+    HWND hkEdit = MakeChild(wnd, L"EDIT", L"", WS_BORDER|ES_AUTOHSCROLL, FX, ry, FW, 26, IDC_HOTKEY);
+    SetWindowSubclass(hkEdit, HotkeyEditSubclass, 0, 0);
+    ry += 36;
 
-void ShowSettingsWindow(HINSTANCE inst, HWND owner) {
-    if (gSettingsWnd) { SetForegroundWindow(gSettingsWnd); return; }
+    MakeChild(wnd, L"BUTTON", L"Hide / show",        BS_AUTOCHECKBOX, FX, ry, FW, 22, IDC_HIDE);
+    ry += 26;
+    MakeChild(wnd, L"BUTTON", L"Minimize / restore", BS_AUTOCHECKBOX, FX, ry, FW, 22, IDC_MIN);
+    ry += 26;
+    MakeChild(wnd, L"BUTTON", L"Pause / resume",     BS_AUTOCHECKBOX, FX, ry, FW, 22, IDC_PAUSE);
+    ry += 32;
 
-    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES };
-    InitCommonControlsEx(&icc);
+    MakeChild(wnd, L"STATIC", L"", SS_LEFTNOWORDWRAP, RX, ry, RPW, 36, IDC_STATUS);
+    ry += 52;
 
-    static bool registered = false;
-    if (!registered) {
-        WNDCLASSW wc = { 0 };
-        wc.lpfnWndProc = SettingsProc;
-        wc.hInstance = inst;
-        wc.lpszClassName = L"UAC_SettingsWnd";
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-        RegisterClassW(&wc);
-        registered = true;
-    }
+    MakeChild(wnd, L"BUTTON", L"Run at startup", BS_AUTOCHECKBOX, RX, ry, RPW, 22, IDC_STARTUP);
+    ry += 36;
 
-    gSettingsWnd = CreateWindowExW(0, L"UAC_SettingsWnd", APPNAME L" - Settings",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 615, 470, owner, NULL, inst, NULL);
-    ShowWindow(gSettingsWnd, SW_SHOW);
+    MakeBtn(wnd, L"Open INI folder",              RX,         ry, 151, 28, IDC_OPENINI);
+    MakeBtn(wnd, L"Install to user programs...",  RX+151+5,   ry, 156, 28, IDC_INSTALL);
 }
 
 static void ApplyFieldsToSelection(HWND wnd) {
@@ -151,8 +300,9 @@ static void ApplyFieldsToSelection(HWND wnd) {
     p->PauseEnabled    = IsDlgButtonChecked(wnd, IDC_PAUSE) == BST_CHECKED;
 
     SaveConfig();
-    Job j = { JOB_RELOAD_CONFIG, 0 };
-    JobQueuePush(j);
+    EnterCriticalSection(&gHotkeyLock);
+    RebuildHotkeys();
+    LeaveCriticalSection(&gHotkeyLock);
     RefreshList(wnd);
 }
 
@@ -160,17 +310,62 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE:
             CreateControls(wnd);
+            EnumChildWindows(wnd, ApplyFontEnum, (LPARAM)gUiFont);
             RefreshList(wnd);
             return 0;
+
+        case WM_ERASEBKGND: {
+            HDC hdc = (HDC)wp;
+            RECT rc; GetClientRect(wnd, &rc);
+            FillRect(hdc, &rc, gBrBg);
+            // subtle vertical separator between list and form
+            HPEN pen = CreatePen(PS_SOLID, 1, C_BORDER);
+            HPEN old = (HPEN)SelectObject(hdc, pen);
+            int sx = M + LW + 7;
+            MoveToEx(hdc, sx, M,      NULL);
+            LineTo  (hdc, sx, M+LH);
+            SelectObject(hdc, old);
+            DeleteObject(pen);
+            return 1;
+        }
+
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORBTN:
+            return HandleCtlColor(msg, wp, lp);
+
+        case WM_DRAWITEM: {
+            DRAWITEMSTRUCT* di = (DRAWITEMSTRUCT*)lp;
+            if (di->CtlType == ODT_BUTTON) DrawThemedButton(di);
+            return TRUE;
+        }
+
         case WM_NOTIFY: {
             LPNMHDR nh = (LPNMHDR)lp;
-            if (nh->idFrom == IDC_LIST && nh->code == LVN_ITEMCHANGED) {
-                LPNMLISTVIEW nv = (LPNMLISTVIEW)lp;
-                if ((nv->uChanged & LVIF_STATE) && (nv->uNewState & LVIS_SELECTED))
-                    LoadSelectionToFields(wnd, (int)nv->lParam);
+            if (nh->idFrom == IDC_LIST) {
+                if (nh->code == NM_CUSTOMDRAW) {
+                    LPNMLVCUSTOMDRAW cd = (LPNMLVCUSTOMDRAW)lp;
+                    switch (cd->nmcd.dwDrawStage) {
+                        case CDDS_PREPAINT:    return CDRF_NOTIFYITEMDRAW;
+                        case CDDS_ITEMPREPAINT: {
+                            BOOL sel = (ListView_GetItemState(nh->hwndFrom,
+                                (int)cd->nmcd.dwItemSpec, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+                            cd->clrText   = sel ? RGB(255,255,255) : C_TEXT;
+                            cd->clrTextBk = sel ? C_ACCENT : C_SURFACE;
+                            return CDRF_DODEFAULT;
+                        }
+                        default: return CDRF_DODEFAULT;
+                    }
+                }
+                if (nh->code == LVN_ITEMCHANGED) {
+                    LPNMLISTVIEW nv = (LPNMLISTVIEW)lp;
+                    if ((nv->uChanged & LVIF_STATE) && (nv->uNewState & LVIS_SELECTED))
+                        LoadSelectionToFields(wnd, (int)nv->lParam);
+                }
             }
             return 0;
         }
+
         case WM_COMMAND: {
             int id = LOWORD(wp), code = HIWORD(wp);
             switch (id) {
@@ -188,7 +383,9 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                         gNumProfiles--;
                         gSelected = -1;
                         SaveConfig();
-                        Job j = { JOB_RELOAD_CONFIG, 0 }; JobQueuePush(j);
+                        EnterCriticalSection(&gHotkeyLock);
+                        RebuildHotkeys();
+                        LeaveCriticalSection(&gHotkeyLock);
                         RefreshList(wnd);
                         LoadSelectionToFields(wnd, -1);
                     }
@@ -207,10 +404,12 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                         int idx = gNumProfiles++;
                         memset(&gProfiles[idx], 0, sizeof(gProfiles[idx]));
                         wcscpy_s(gProfiles[idx].ProgramExeName, MAX_NAME, name);
-                        wcscpy_s(gProfiles[idx].ProgramPath, MAX_PATH, path);
+                        wcscpy_s(gProfiles[idx].ProgramPath,    MAX_PATH, path);
                         LeaveCriticalSection(&gHotkeyLock);
                         SaveConfig();
-                        Job j = { JOB_RELOAD_CONFIG, 0 }; JobQueuePush(j);
+                        EnterCriticalSection(&gHotkeyLock);
+                        RebuildHotkeys();
+                        LeaveCriticalSection(&gHotkeyLock);
                         RefreshList(wnd);
                     }
                     break;
@@ -218,20 +417,68 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+
         case WM_CLOSE:   DestroyWindow(wnd); return 0;
         case WM_DESTROY: gSettingsWnd = NULL; return 0;
     }
     return DefWindowProcW(wnd, msg, wp, lp);
 }
 
-typedef struct { wchar_t name[MAX_NAME]; wchar_t path[MAX_PATH]; } PickRow;
-static PickRow gPickRows[2048];
-static int gPickCount = 0;
-static int gPickResult = -1;
-static bool gPickDone = false;
+void ShowSettingsWindow(HINSTANCE inst, HWND owner) {
+    if (gSettingsWnd) { SetForegroundWindow(gSettingsWnd); return; }
 
-static void FillProcessList(HWND list, HIMAGELIST il) {
+    InitTheme();
+
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES };
+    InitCommonControlsEx(&icc);
+
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = { sizeof(wc) };
+        wc.lpfnWndProc   = SettingsProc;
+        wc.hInstance     = inst;
+        wc.lpszClassName = L"UAC_SettingsWnd";
+        wc.hbrBackground = NULL;   // handled in WM_ERASEBKGND
+        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
+        wc.hIcon         = LoadIconW(inst, MAKEINTRESOURCEW(IDI_ICON1));
+        wc.hIconSm       = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(IDI_ICON1),
+                               IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    {
+        DWORD winStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        RECT wrc = { 0, 0, FX + FW + M, M + LH + 8 + 28 + M };
+        AdjustWindowRectEx(&wrc, winStyle, FALSE, 0);
+        gSettingsWnd = CreateWindowExW(0, L"UAC_SettingsWnd", APPNAME L" - Settings",
+            winStyle, CW_USEDEFAULT, CW_USEDEFAULT,
+            wrc.right - wrc.left, wrc.bottom - wrc.top,
+            owner, NULL, inst, NULL);
+    }
+    ShowWindow(gSettingsWnd, SW_SHOW);
+}
+
+// ---- Process picker ----
+typedef struct {
+    wchar_t name[MAX_NAME];
+    wchar_t path[MAX_PATH];
+    int     iconIdx;
+} PickRow;
+static PickRow gPickRows[2048];
+static int     gPickCount  = 0;
+static int     gPickResult = -1;
+static bool    gPickDone   = false;
+
+static int ComparePickRows(const void* a, const void* b) {
+    return _wcsicmp(((const PickRow*)a)->name, ((const PickRow*)b)->name);
+}
+
+static void FillProcessList(HWND list) {
     gPickCount = 0;
+    HIMAGELIST il = ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 16, 16);
+    ListView_SetImageList(list, il, LVSIL_SMALL);
+
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return;
     PROCESSENTRY32W pe = { sizeof(pe) };
@@ -241,50 +488,124 @@ static void FillProcessList(HWND list, HIMAGELIST il) {
             PickRow* r = &gPickRows[gPickCount];
             wcscpy_s(r->name, MAX_NAME, pe.szExeFile);
             r->path[0] = 0;
+            r->iconIdx = -1;
             HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
             if (h) {
                 DWORD cb = MAX_PATH;
                 QueryFullProcessImageNameW(h, 0, r->path, &cb);
                 CloseHandle(h);
             }
-            int iconIdx = -1;
             if (r->path[0]) {
                 SHFILEINFOW sfi = { 0 };
                 if (SHGetFileInfoW(r->path, 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON)) {
-                    iconIdx = ImageList_AddIcon(il, sfi.hIcon);
+                    r->iconIdx = ImageList_AddIcon(il, sfi.hIcon);
                     DestroyIcon(sfi.hIcon);
                 }
             }
-            LVITEMW it = { 0 };
-            it.mask = LVIF_TEXT | LVIF_PARAM | (iconIdx >= 0 ? LVIF_IMAGE : 0);
-            it.iItem = gPickCount; it.lParam = gPickCount; it.iImage = iconIdx;
-            it.pszText = r->name;
-            int row = ListView_InsertItem(list, &it);
-            ListView_SetItemText(list, row, 1, r->path);
             gPickCount++;
         } while (Process32NextW(snap, &pe));
     }
     CloseHandle(snap);
+    qsort(gPickRows, gPickCount, sizeof(PickRow), ComparePickRows);
+
+    // Deduplicate by exe name; prefer entries that have a resolved path/icon
+    int n = 0;
+    for (int i = 0; i < gPickCount; i++) {
+        if (n == 0 || _wcsicmp(gPickRows[i].name, gPickRows[n-1].name) != 0) {
+            if (n != i) gPickRows[n] = gPickRows[i];
+            n++;
+        } else if (!gPickRows[n-1].path[0] && gPickRows[i].path[0]) {
+            gPickRows[n-1] = gPickRows[i];
+        }
+    }
+    gPickCount = n;
+}
+
+static void ApplyFilter(HWND wnd, const wchar_t* filter) {
+    HWND list = GetDlgItem(wnd, IDC_PICKLIST);
+    ListView_DeleteAllItems(list);
+    int row = 0;
+    for (int i = 0; i < gPickCount; i++) {
+        if (!filter[0] || StrStrIW(gPickRows[i].name, filter) || StrStrIW(gPickRows[i].path, filter)) {
+            LVITEMW it = { 0 };
+            it.mask    = LVIF_TEXT | LVIF_PARAM | (gPickRows[i].iconIdx >= 0 ? LVIF_IMAGE : 0);
+            it.iItem   = row++;
+            it.lParam  = i;
+            it.iImage  = gPickRows[i].iconIdx;
+            it.pszText = gPickRows[i].name;
+            int r = ListView_InsertItem(list, &it);
+            ListView_SetItemText(list, r, 1, gPickRows[i].path);
+        }
+    }
+    if (row > 0)
+        ListView_SetItemState(list, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
 }
 
 static LRESULT CALLBACK PickProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE: {
+            MakeChild(wnd, L"STATIC", L"Filter:", SS_RIGHT | SS_CENTERIMAGE,
+                      12, 15, 52, 22, 0);
+            MakeChild(wnd, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
+                      68, 12, 460, 26, IDC_PICKFILTER);
+
             HWND list = MakeChild(wnd, WC_LISTVIEWW, L"",
-                LVS_REPORT | LVS_SINGLESEL | WS_BORDER, 10, 10, 460, 300, IDC_PICKLIST);
-            ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT);
+                LVS_REPORT | LVS_SINGLESEL | WS_BORDER, 12, 48, 516, 318, IDC_PICKLIST);
+            ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+            SetWindowTheme(list, L"Explorer", NULL);
+            ListView_SetBkColor(list, C_SURFACE);
+            ListView_SetTextColor(list, C_TEXT);
+            ListView_SetTextBkColor(list, C_SURFACE);
             LVCOLUMNW c = { 0 }; c.mask = LVCF_TEXT | LVCF_WIDTH;
-            c.pszText = L"Process"; c.cx = 160; ListView_InsertColumn(list, 0, &c);
-            c.pszText = L"Path";    c.cx = 290; ListView_InsertColumn(list, 1, &c);
-            HIMAGELIST il = ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 16, 16);
-            ListView_SetImageList(list, il, LVSIL_SMALL);
-            FillProcessList(list, il);
-            MakeChild(wnd, L"BUTTON", L"Add", BS_DEFPUSHBUTTON, 300, 320, 80, 26, IDC_PICKOK);
-            MakeChild(wnd, L"BUTTON", L"Cancel", BS_PUSHBUTTON, 390, 320, 80, 26, IDC_PICKCANCEL);
+            c.pszText = L"Process"; c.cx = 165; ListView_InsertColumn(list, 0, &c);
+            c.pszText = L"Path";    c.cx = 336; ListView_InsertColumn(list, 1, &c);
+
+            FillProcessList(list);
+            ApplyFilter(wnd, L"");
+
+            MakeBtn(wnd, L"Add",    332, 378, 96, 30, IDC_PICKOK);
+            MakeBtn(wnd, L"Cancel", 432, 378, 96, 30, IDC_PICKCANCEL);
+
+            EnumChildWindows(wnd, ApplyFontEnum, (LPARAM)gUiFont);
             return 0;
         }
-        case WM_COMMAND:
-            if (LOWORD(wp) == IDC_PICKOK) {
+        case WM_ERASEBKGND: {
+            HDC hdc = (HDC)wp;
+            RECT rc; GetClientRect(wnd, &rc);
+            FillRect(hdc, &rc, gBrBg);
+            return 1;
+        }
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORBTN:
+            return HandleCtlColor(msg, wp, lp);
+        case WM_DRAWITEM: {
+            DRAWITEMSTRUCT* di = (DRAWITEMSTRUCT*)lp;
+            if (di->CtlType == ODT_BUTTON) DrawThemedButton(di);
+            return TRUE;
+        }
+        case WM_NOTIFY: {
+            LPNMHDR nh = (LPNMHDR)lp;
+            if (nh->idFrom == IDC_PICKLIST && nh->code == NM_CUSTOMDRAW) {
+                LPNMLVCUSTOMDRAW cd = (LPNMLVCUSTOMDRAW)lp;
+                if (cd->nmcd.dwDrawStage == CDDS_PREPAINT)     return CDRF_NOTIFYITEMDRAW;
+                if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                    BOOL sel = (ListView_GetItemState(nh->hwndFrom,
+                        (int)cd->nmcd.dwItemSpec, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+                    cd->clrText   = sel ? RGB(255, 255, 255) : C_TEXT;
+                    cd->clrTextBk = sel ? C_ACCENT : C_SURFACE;
+                    return CDRF_DODEFAULT;
+                }
+            }
+            return 0;
+        }
+        case WM_COMMAND: {
+            int id = LOWORD(wp), code = HIWORD(wp);
+            if (id == IDC_PICKFILTER && code == EN_CHANGE) {
+                wchar_t filter[256];
+                GetDlgItemTextW(wnd, IDC_PICKFILTER, filter, _countof(filter));
+                ApplyFilter(wnd, filter);
+            } else if (id == IDC_PICKOK) {
                 HWND list = GetDlgItem(wnd, IDC_PICKLIST);
                 int sel = ListView_GetNextItem(list, -1, LVNI_SELECTED);
                 if (sel >= 0) {
@@ -293,11 +614,14 @@ static LRESULT CALLBACK PickProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                     gPickResult = (int)it.lParam;
                 }
                 gPickDone = true; DestroyWindow(wnd);
-            } else if (LOWORD(wp) == IDC_PICKCANCEL) {
+            } else if (id == IDC_PICKCANCEL) {
                 gPickResult = -1; gPickDone = true; DestroyWindow(wnd);
             }
             return 0;
-        case WM_CLOSE: gPickResult = -1; gPickDone = true; DestroyWindow(wnd); return 0;
+        }
+        case WM_CLOSE:
+            gPickResult = -1; gPickDone = true; DestroyWindow(wnd);
+            return 0;
     }
     return DefWindowProcW(wnd, msg, wp, lp);
 }
@@ -306,20 +630,49 @@ bool PickRunningProcess(HWND parent, wchar_t* outName, int nameCch, wchar_t* out
     static bool reg = false;
     if (!reg) {
         WNDCLASSW wc = { 0 };
-        wc.lpfnWndProc = PickProc; wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpfnWndProc   = PickProc;
+        wc.hInstance     = GetModuleHandleW(NULL);
         wc.lpszClassName = L"UAC_PickWnd";
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = NULL;
+        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
         RegisterClassW(&wc); reg = true;
     }
     gPickResult = -1; gPickDone = false;
+    DWORD pickStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    RECT prc = { 0, 0, 540, 420 };
+    AdjustWindowRectEx(&prc, pickStyle, FALSE, 0);
     HWND wnd = CreateWindowExW(0, L"UAC_PickWnd", L"Pick a running process",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 500, 390, parent, NULL, GetModuleHandleW(NULL), NULL);
+        pickStyle, CW_USEDEFAULT, CW_USEDEFAULT,
+        prc.right - prc.left, prc.bottom - prc.top,
+        parent, NULL, GetModuleHandleW(NULL), NULL);
     ShowWindow(wnd, SW_SHOW);
+    SetFocus(GetDlgItem(wnd, IDC_PICKFILTER));
     EnableWindow(parent, FALSE);
     MSG m;
     while (!gPickDone && GetMessageW(&m, NULL, 0, 0)) {
+        if (m.message == WM_KEYDOWN) {
+            if (m.wParam == VK_ESCAPE) {
+                wchar_t filter[256];
+                GetDlgItemTextW(wnd, IDC_PICKFILTER, filter, _countof(filter));
+                if (filter[0])
+                    SetDlgItemTextW(wnd, IDC_PICKFILTER, L"");
+                else {
+                    gPickResult = -1; gPickDone = true; DestroyWindow(wnd);
+                }
+                continue;
+            }
+            if (m.wParam == VK_RETURN) {
+                HWND list = GetDlgItem(wnd, IDC_PICKLIST);
+                int sel = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+                if (sel >= 0) {
+                    LVITEMW it = { 0 }; it.mask = LVIF_PARAM; it.iItem = sel;
+                    ListView_GetItem(list, &it);
+                    gPickResult = (int)it.lParam;
+                    gPickDone = true; DestroyWindow(wnd);
+                }
+                continue;
+            }
+        }
         if (!IsDialogMessageW(wnd, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
     }
     EnableWindow(parent, TRUE);

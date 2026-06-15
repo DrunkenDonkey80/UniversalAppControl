@@ -3,25 +3,47 @@
 #include <stdio.h>
 #include <string.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #pragma comment(lib, "Shell32.lib")
+#pragma comment(lib, "Shlwapi.lib")
 
 static wchar_t gConfigDir[MAX_PATH];
 static wchar_t gConfigPath[MAX_PATH];
 
-const wchar_t* GetConfigDir(void) {
-    if (gConfigDir[0] == 0) {
-        wchar_t appData[MAX_PATH];
-        if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData))) {
-            swprintf_s(gConfigDir, _countof(gConfigDir), L"%s\\UniversalAppControl", appData);
-            CreateDirectoryW(gConfigDir, NULL);  // ok if it already exists
-        }
+static void ResolveConfig(void) {
+    if (gConfigPath[0]) return;
+
+    // Prefer the installed location so all instances share one config
+    wchar_t local[MAX_PATH];
+    SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, local);
+    wchar_t candidate[MAX_PATH];
+    swprintf_s(candidate, _countof(candidate),
+               L"%s\\Programs\\UniversalAppControl\\UniversalAppControl.ini", local);
+
+    if (PathFileExistsW(candidate)) {
+        wcscpy_s(gConfigPath, _countof(gConfigPath), candidate);
+    } else {
+        // Fall back to the directory the exe is running from
+        wcscpy_s(gConfigPath, _countof(gConfigPath), GetExePath());
+        wchar_t* slash = wcsrchr(gConfigPath, L'\\');
+        if (slash)
+            swprintf_s(slash + 1,
+                       _countof(gConfigPath) - (int)(slash + 1 - gConfigPath),
+                       L"UniversalAppControl.ini");
     }
+
+    wcscpy_s(gConfigDir, _countof(gConfigDir), gConfigPath);
+    wchar_t* slash = wcsrchr(gConfigDir, L'\\');
+    if (slash) *slash = 0;
+}
+
+const wchar_t* GetConfigDir(void) {
+    ResolveConfig();
     return gConfigDir;
 }
 
 const wchar_t* GetConfigPath(void) {
-    if (gConfigPath[0] == 0)
-        swprintf_s(gConfigPath, _countof(gConfigPath), L"%s\\config.ini", GetConfigDir());
+    ResolveConfig();
     return gConfigPath;
 }
 
@@ -68,11 +90,10 @@ static void WriteBool(const wchar_t* section, const wchar_t* key, BOOL v) {
 
 void SaveConfig(void) {
     const wchar_t* path = GetConfigPath();
-    // Clear the whole file first so removed entries disappear.
-    WritePrivateProfileStringW(NULL, NULL, NULL, path);
+    // Delete and recreate to ensure all old sections are gone.
+    DeleteFileW(path);
 
     WriteBool(L"general", L"Debug", gConfig.Debug);
-    WriteBool(L"general", L"TrayIcon", gConfig.TrayIcon);
 
     for (int i = 0; i < gNumProfiles; i++) {
         PROFILE_CONFIG* p = &gProfiles[i];

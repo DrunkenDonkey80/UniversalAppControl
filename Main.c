@@ -56,6 +56,7 @@ typedef struct _WindowInfo
 {
 	HWND WindowHandle;
 	u32 ProcessID;
+	wchar_t ExeName[MAX_NAME];
 } WindowInfo;
 
 
@@ -115,7 +116,7 @@ static void ReadConfigList(const wchar_t* section, const wchar_t* variable, wcha
 	//now add to the list
 	b = buffer;
 	while (*b) {
-
+		if (*numListValues >= MAX_PROCESSES_PER_PROFILE) break;
 		wcscpy_s(listValues[*numListValues], MAX_NAME, b);
 		(*numListValues)++;
 		b += lstrlen(b) + 1;
@@ -131,6 +132,9 @@ static void RegisterConfigHotkey(const wchar_t* section, const wchar_t* variable
 		return;
 
 	if (hotKey != 0) {
+		gProfiles[profileID].HotKey = hotKey;
+		gProfiles[profileID].HotKeyModifiers = modifiers;
+
 		//we have it already registered?
 		bool found = false;
 		for (int i = 0; i < gNumHotkeys; i++) {
@@ -162,6 +166,30 @@ void UnregisterHotkeys() {
 		UnregisterHotKey(NULL, i);
 
 	gNumHotkeys = 0;
+}
+
+void RebuildHotkeys(void) {
+	UnregisterHotkeys();
+	for (int i = 0; i < gNumProfiles; i++) {
+		PROFILE_CONFIG* p = &gProfiles[i];
+		if (!p->HotKey) continue;
+		bool found = false;
+		for (int j = 0; j < gNumHotkeys; j++) {
+			if (gHotkeys[j].HotKey == p->HotKey && gHotkeys[j].Modifiers == p->HotKeyModifiers) {
+				gHotkeys[j].ProfileIDs[gHotkeys[j].NumProfileIDs++] = i;
+				found = true;
+				break;
+			}
+		}
+		if (!found && gNumHotkeys < MAX_PROFILES) {
+			gHotkeys[gNumHotkeys].HotKey       = p->HotKey;
+			gHotkeys[gNumHotkeys].Modifiers     = p->HotKeyModifiers;
+			gHotkeys[gNumHotkeys].Triggered     = false;
+			gHotkeys[gNumHotkeys].NumProfileIDs = 1;
+			gHotkeys[gNumHotkeys].ProfileIDs[0] = i;
+			gNumHotkeys++;
+		}
+	}
 }
 
 void EnableDebugConsole() {
@@ -199,7 +227,8 @@ static bool ReadConfig() {
 	DWORD charsRead = GetPrivateProfileSectionNames(buffer, sizeof(buffer) / sizeof(wchar_t), iniFilePath);
 
 	if (charsRead == 0) {
-		return false;
+		// No config file yet (first run) or empty file - treat as empty config
+		return true;
 	}
 
 	// Parse the buffer to extract section names
@@ -212,9 +241,8 @@ static bool ReadConfig() {
 			if (gConfig.Debug)
 				EnableDebugConsole();
 
-			gConfig.TrayIcon = ReadConfigBool(sectionName, L"TrayIcon", false);
 		}
-		else {
+		else if (gNumProfiles < MAX_PROFILES) {
 			//profile
 			RegisterConfigHotkey(sectionName, L"Hotkey", gNumProfiles);
 
@@ -321,6 +349,7 @@ bool SuspendProcess(u32 id) {
 	gPausedProcesses[gNumPausedProcesses++] = id;
 	CloseHandle(ProcessHandle);
 	DbgPrint(L"Process paused!");
+	return true;
 }
 
 bool IsProcessPaused(u32 id) {
@@ -356,15 +385,26 @@ static BOOL CALLBACK enumWindowCallback(HWND hWnd, LPARAM lparam) {
 	if (gNumWindowInfo >= MAX_WINDOW_INFO)
 		return FALSE;
 
-	if (GetWindow(hWnd, GW_OWNER) == NULL)
-	{
-		gWindowInfo[gNumWindowInfo].WindowHandle = hWnd;
-		gWindowInfo[gNumWindowInfo].ProcessID = 0;
-		GetWindowThreadProcessId(hWnd, &gWindowInfo[gNumWindowInfo].ProcessID);
+	if (GetWindow(hWnd, GW_OWNER) != NULL)
+		return TRUE;
 
-		gNumWindowInfo++;
+	int n = gNumWindowInfo;
+	gWindowInfo[n].WindowHandle = hWnd;
+	gWindowInfo[n].ProcessID    = 0;
+	gWindowInfo[n].ExeName[0]   = 0;
+	GetWindowThreadProcessId(hWnd, &gWindowInfo[n].ProcessID);
+	if (gWindowInfo[n].ProcessID) {
+		HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, gWindowInfo[n].ProcessID);
+		if (h) {
+			wchar_t path[MAX_PATH]; DWORD len = MAX_PATH;
+			if (QueryFullProcessImageNameW(h, 0, path, &len)) {
+				wchar_t* slash = wcsrchr(path, L'\\');
+				wcscpy_s(gWindowInfo[n].ExeName, MAX_NAME, slash ? slash + 1 : path);
+			}
+			CloseHandle(h);
+		}
 	}
-
+	gNumWindowInfo++;
 	return TRUE;
 }
 
@@ -435,7 +475,7 @@ HWND FindWindowWithTitle(LPCTSTR title) {
 			}
 		}
 		else {
-			if (!lstrcmpi(windowTitle, search) == 0) {
+			if (lstrcmpi(windowTitle, search) == 0) {
 				return hwnd;  // Found the window
 			}
 		}
@@ -468,12 +508,12 @@ bool HideWindowForProfile(HWND hWnd, int profileId, HWND activeWindow) {
 			ShowWindow(hWnd, SW_HIDE);
 			windowChanged = true;
 		}
-		else if (gProfiles[profileId].MinimizeEnabled) {
+		else if (gProfiles[profileId].MinimizeEnabled && IsWindowVisible(hWnd) && !IsIconic(hWnd)) {
 			ShowWindow(hWnd, SW_MINIMIZE);
 			windowChanged = true;
 		}
 
-		if (windowChanged) {
+		if (windowChanged && gProfiles[profileId].NumHiddenWindows < MAX_PROCESSES_PER_PROFILE) {
 			gProfiles[profileId].HiddenWindows[gProfiles[profileId].NumHiddenWindows++] = hWnd;
 		}
 	}
@@ -492,9 +532,10 @@ bool HideWindowsForPofile(int profileId) {
 				windowChanged = true;
 		}
 	}
-	else if (gProfiles[profileId].ProcessID != 0 && (gProfiles[profileId].HideEnabled || gProfiles[profileId].MinimizeEnabled)) {
+	else if (gProfiles[profileId].ProgramExeName[0] &&
+	         (gProfiles[profileId].HideEnabled || gProfiles[profileId].MinimizeEnabled)) {
 		for (int i = 0; i < gNumWindowInfo; i++) {
-			if (gWindowInfo[i].ProcessID == gProfiles[profileId].ProcessID) {
+			if (_wcsicmp(gWindowInfo[i].ExeName, gProfiles[profileId].ProgramExeName) == 0) {
 				if (HideWindowForProfile(gWindowInfo[i].WindowHandle, profileId, activeWindow))
 					windowChanged = true;
 			}
@@ -520,27 +561,33 @@ bool RestoreWindow(HWND hWnd, bool hide, bool minimise) {
 bool RestoreWindowsForPofile(int profileId) {
 	bool windowChanged = false;
 
-	//special case of no hidden windows when the program gets restarted - try to restore them all
-	if (gProfiles[profileId].NumHiddenWindows == 0) {
-		if (gProfiles[profileId].ProcessID != 0 && gProfiles[profileId].HideEnabled) {
-			for (int i = 0; i < gNumWindowInfo; i++) {
-				if (gWindowInfo[i].ProcessID == gProfiles[profileId].ProcessID) {
-					gProfiles[profileId].HiddenWindows[gProfiles[profileId].NumHiddenWindows++] = gWindowInfo[i].WindowHandle;
-				}
+	// No tracked windows: find current windows for this profile (handles UAC restart + unfocused-but-visible case).
+	// Only include visible windows — invisible helpers (e.g. QTrayIconMessageWindow) have WS_VISIBLE cleared
+	// and must not be SW_SHOW'd by RestoreWindow below.
+	if (gProfiles[profileId].NumHiddenWindows == 0 && gProfiles[profileId].ProgramExeName[0]) {
+		for (int i = 0; i < gNumWindowInfo; i++) {
+			if (_wcsicmp(gWindowInfo[i].ExeName, gProfiles[profileId].ProgramExeName) == 0 &&
+			    gProfiles[profileId].NumHiddenWindows < MAX_PROCESSES_PER_PROFILE &&
+			    IsWindowVisible(gWindowInfo[i].WindowHandle)) {
+				gProfiles[profileId].HiddenWindows[gProfiles[profileId].NumHiddenWindows++] = gWindowInfo[i].WindowHandle;
 			}
 		}
 	}
 
+	HWND toFocus = NULL;
 	for (int i = 0; i < gProfiles[profileId].NumHiddenWindows; i++) {
-		if (RestoreWindow(gProfiles[profileId].HiddenWindows[i], gProfiles[profileId].HideEnabled, gProfiles[profileId].MinimizeEnabled)) {
-			if (gProfiles[profileId].ForegroundWindow == gProfiles[profileId].HiddenWindows[i]) {
-				HWND active = gProfiles[profileId].ForegroundWindow != 0 ? gProfiles[profileId].ForegroundWindow : gProfiles[profileId].HiddenWindows[0];
-				SetForegroundWindow(active);
-				SetActiveWindow(active);
-				SetFocus(active);
-			}
+		HWND hw = gProfiles[profileId].HiddenWindows[i];
+		if (!IsWindow(hw)) continue;
+		if (RestoreWindow(hw, gProfiles[profileId].HideEnabled, gProfiles[profileId].MinimizeEnabled))
 			windowChanged = true;
-		}
+		if (toFocus == NULL) toFocus = hw;
+		if (hw == gProfiles[profileId].ForegroundWindow) toFocus = hw;
+	}
+	if (toFocus) {
+		if (IsIconic(toFocus)) ShowWindow(toFocus, SW_RESTORE);
+		SetForegroundWindow(toFocus);
+		SetActiveWindow(toFocus);
+		SetFocus(toFocus);
 	}
 	gProfiles[profileId].NumHiddenWindows = 0;
 	return windowChanged;
@@ -585,19 +632,13 @@ void HandleProfile(int profileId, bool trigger) {
 	}
 	else {
 		//order is - unpause / show / restore here, processes first, windows last
-		if (gProfiles[profileId].ProcessID != 0) {
-			bool processAwoken = false;
-			if (gProfiles[profileId].PauseEnabled) {
-				ResumeProcess(gProfiles[profileId].ProcessID);
-				processAwoken = true;
-			}
-			if (processAwoken) {
-				//give it some time to react
-				Sleep(10);
-			}
-
-			RestoreWindowsForPofile(profileId);
+		bool processAwoken = false;
+		if (gProfiles[profileId].PauseEnabled && gProfiles[profileId].ProcessID != 0) {
+			ResumeProcess(gProfiles[profileId].ProcessID);
+			processAwoken = true;
 		}
+		if (processAwoken) Sleep(10);
+		RestoreWindowsForPofile(profileId);
 	}
 }
 
@@ -607,14 +648,34 @@ void DispatchHotkey(int hkID)
 	UpdateWindowProcessIDs();
 
 	EnterCriticalSection(&gHotkeyLock);
-	gHotkeys[hkID].Triggered = !gHotkeys[hkID].Triggered;
-	bool triggered = gHotkeys[hkID].Triggered;
 	int ids[MAX_PROFILES]; int n = gHotkeys[hkID].NumProfileIDs;
 	for (int i = 0; i < n; i++) ids[i] = gHotkeys[hkID].ProfileIDs[i];
 	LeaveCriticalSection(&gHotkeyLock);
 
+	// Hide if any profile window is currently focused; otherwise restore/bring to front.
+	// A minimized (iconic) window is never "in front" even if GetForegroundWindow returns it.
+	HWND fg = GetForegroundWindow();
+	bool trigger = false;
+	if (fg && !IsIconic(fg)) {
+		for (int i = 0; i < n && !trigger; i++) {
+			int pid = ids[i];
+			if (gProfiles[pid].NumWindows > 0) {
+				for (int j = 0; j < gProfiles[pid].NumWindows && !trigger; j++) {
+					HWND found = FindWindowWithTitle(gProfiles[pid].WindowNames[j]);
+					if (found && found == fg) trigger = true;
+				}
+			} else {
+				for (int k = 0; k < gNumWindowInfo && !trigger; k++) {
+					if (_wcsicmp(gWindowInfo[k].ExeName, gProfiles[pid].ProgramExeName) == 0 &&
+					    gWindowInfo[k].WindowHandle == fg)
+						trigger = true;
+				}
+			}
+		}
+	}
+
 	for (int i = 0; i < n; i++)
-		HandleProfile(ids[i], triggered);
+		HandleProfile(ids[i], trigger);
 }
 
 
@@ -732,6 +793,7 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 				break;
 			}
 			if (LParam == WM_RBUTTONUP) {
+				FixStartupPathIfStale();
 				HMENU menu = CreatePopupMenu();
 				AppendMenuW(menu, MF_STRING, IDM_SETTINGS, L"Settings...");
 				AppendMenuW(menu, MF_STRING | (IsStartupEnabled() ? MF_CHECKED : 0),
@@ -807,15 +869,12 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 		goto Exit;
 	}
 
-	gMutex = NULL;
-	for (int attempt = 0; attempt < 50; attempt++) {
-		gMutex = CreateMutexW(NULL, FALSE, APPNAME);
-		if (GetLastError() != ERROR_ALREADY_EXISTS) break;
+	gMutex = CreateMutexW(NULL, FALSE, APPNAME);
+	if (GetLastError() == ERROR_ALREADY_EXISTS) {
 		CloseHandle(gMutex); gMutex = NULL;
-		Sleep(100);
-	}
-	if (gMutex == NULL) {
-		MsgBox(L"An instance of the program is already running.", APPNAME L" Error", MB_OK | MB_ICONERROR);
+		HWND existingWnd = FindWindowW(APPNAME L"_WndClass", NULL);
+		if (existingWnd)
+			PostMessageW(existingWnd, WM_COMMAND, MAKEWPARAM(IDM_SETTINGS, 0), 0);
 		goto Exit;
 	}
 	if ((NtDll = GetModuleHandleW(L"ntdll.dll")) == NULL)
@@ -847,7 +906,6 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	// The Windows system tray API obviously won't work if there is no Windows system tray. I don't know if the user's
 	// shell even has a taskbar so I'm skipping that too.
 
-	if (gConfig.TrayIcon)
 	{
 		WNDCLASSW WndClass = { 0 };
 		HWND HWnd = NULL;
@@ -906,7 +964,7 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	}
 
 	if (!autostart)
-		ShowSettingsWindow(Instance, gConfig.TrayIcon ? gTrayNotifyIconData.hWnd : NULL);
+		ShowSettingsWindow(Instance, gTrayNotifyIconData.hWnd);
 
 	while (gIsRunning)
 	{
@@ -923,15 +981,26 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	{ Job j = { JOB_SHUTDOWN, 0 }; JobQueuePush(j); }
 	if (workerThread) WaitForSingleObject(workerThread, 2000);
 
-	//restore back all profiles
-	for (int i = 0; i < gNumHotkeys; i++) {
-		if (gHotkeys[i].Triggered) {
-			gHotkeys[i].Triggered = false;
-			for (int j = 0; j < gHotkeys[i].NumProfileIDs; j++) {
-				int profileId = gHotkeys[i].ProfileIDs[j];
-				HandleProfile(profileId, false);
+	// Resume any processes we suspended
+	for (int i = 0; i < gNumPausedProcesses; i++) {
+		HANDLE h = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, gPausedProcesses[i]);
+		if (h) { NtResumeProcess(h); CloseHandle(h); }
+	}
+	if (gNumPausedProcesses > 0) Sleep(50);
+	gNumPausedProcesses = 0;
+
+	// Restore all windows we hid or minimized
+	for (int i = 0; i < gNumProfiles; i++) {
+		for (int j = 0; j < gProfiles[i].NumHiddenWindows; j++) {
+			HWND hw = gProfiles[i].HiddenWindows[j];
+			if (IsWindow(hw)) {
+				if (gProfiles[i].HideEnabled)
+					ShowWindow(hw, SW_SHOW);
+				else if (gProfiles[i].MinimizeEnabled)
+					ShowWindow(hw, SW_RESTORE);
 			}
 		}
+		gProfiles[i].NumHiddenWindows = 0;
 	}
 
 Exit:

@@ -5,6 +5,7 @@
 #include "config.h"
 #include "install.h"
 #include "worker.h"
+#include "display.h"
 #include <commctrl.h>
 #include <shlwapi.h>
 #pragma comment(lib, "Shlwapi.lib")
@@ -117,6 +118,33 @@ HWND gSettingsWnd = NULL;
 static int gSelected = -1;
 
 static LRESULT CALLBACK SettingsProc(HWND, UINT, WPARAM, LPARAM);
+static void ShowPresetEditor(HWND parent);   // preset management dialog
+static bool gWarnedUnsupported = false;      // warn once per session
+
+// Rebuild the preset combo for a profile selection.
+// Adds "(none)" as first entry followed by all named presets.
+static void RefreshPresetCombo(HWND wnd, int selectedProfileIdx) {
+    HWND cb = GetDlgItem(wnd, IDC_PRESET);
+    if (!cb) return;
+    ComboBox_ResetContent(cb);
+    ComboBox_AddString(cb, L"(none)");
+    for (int i = 0; i < gNumPresets; i++)
+        ComboBox_AddString(cb, gPresets[i].Name);
+    // Select the current profile's preset
+    int sel = 0;  // default: (none)
+    if (selectedProfileIdx >= 0 && selectedProfileIdx < gNumProfiles) {
+        const wchar_t* cur = gProfiles[selectedProfileIdx].DisplayPreset;
+        if (cur[0]) {
+            for (int i = 0; i < gNumPresets; i++) {
+                if (_wcsicmp(gPresets[i].Name, cur) == 0) { sel = i + 1; break; }
+            }
+        }
+    }
+    ComboBox_SetCurSel(cb, sel);
+    // Gray out if display control is off
+    EnableWindow(cb, gDisplayControlEnabled ? TRUE : FALSE);
+    EnableWindow(GetDlgItem(wnd, IDC_PRESETEDIT), gDisplayControlEnabled ? TRUE : FALSE);
+}
 
 static void RefreshList(HWND wnd) {
     HWND list = GetDlgItem(wnd, IDC_LIST);
@@ -138,6 +166,9 @@ static void RefreshList(HWND wnd) {
         ListView_EnsureVisible(list, gSelected, FALSE);
     }
     CheckDlgButton(wnd, IDC_STARTUP, IsStartupEnabled() ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(wnd, IDC_DISPLAYCTL, gDisplayControlEnabled ? BST_CHECKED : BST_UNCHECKED);
+    // Refresh preset combo for current selection
+    RefreshPresetCombo(wnd, gSelected);
 }
 
 static void LoadSelectionToFields(HWND wnd, int idx) {
@@ -150,6 +181,9 @@ static void LoadSelectionToFields(HWND wnd, int idx) {
         CheckDlgButton(wnd, IDC_HIDE,  BST_UNCHECKED);
         CheckDlgButton(wnd, IDC_MIN,   BST_UNCHECKED);
         CheckDlgButton(wnd, IDC_PAUSE, BST_UNCHECKED);
+        CheckDlgButton(wnd, IDC_DISPLAYCTL,
+                       gDisplayControlEnabled ? BST_CHECKED : BST_UNCHECKED);
+        RefreshPresetCombo(wnd, -1);
         return;
     }
     PROFILE_CONFIG* p = &gProfiles[idx];
@@ -169,6 +203,9 @@ static void LoadSelectionToFields(HWND wnd, int idx) {
     CheckDlgButton(wnd, IDC_HIDE,  p->HideEnabled     ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(wnd, IDC_MIN,   p->MinimizeEnabled  ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(wnd, IDC_PAUSE, p->PauseEnabled     ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(wnd, IDC_DISPLAYCTL,
+                   gDisplayControlEnabled ? BST_CHECKED : BST_UNCHECKED);
+    RefreshPresetCombo(wnd, idx);
 }
 
 static HWND MakeChild(HWND parent, const wchar_t* cls, const wchar_t* text,
@@ -269,8 +306,23 @@ static void CreateControls(HWND wnd) {
     MakeChild(wnd, L"BUTTON", L"Pause / resume",     BS_AUTOCHECKBOX, FX, ry, FW, 22, IDC_PAUSE);
     ry += 32;
 
+    // --- Display preset row ---
+    MakeChild(wnd, L"STATIC", L"Display:", SS_RIGHT | SS_CENTERIMAGE,
+              RX, ry+2, LBW, 20, IDC_PRESETLBL);
+    // Preset combo: narrower to leave room for Edit button
+    MakeChild(wnd, L"COMBOBOX", L"",
+              CBS_DROPDOWNLIST | WS_VSCROLL,
+              FX, ry, FW - 72, 200, IDC_PRESET);
+    MakeBtn(wnd, L"Edit...", FX + FW - 68, ry, 68, 26, IDC_PRESETEDIT);
+    ry += 34;
+
     MakeChild(wnd, L"STATIC", L"", SS_LEFTNOWORDWRAP, RX, ry, RPW, 36, IDC_STATUS);
     ry += 52;
+
+    // --- Global controls ---
+    MakeChild(wnd, L"BUTTON", L"Control monitor brightness (DDC/CI)",
+              BS_AUTOCHECKBOX, RX, ry, RPW, 22, IDC_DISPLAYCTL);
+    ry += 28;
 
     MakeChild(wnd, L"BUTTON", L"Run at startup", BS_AUTOCHECKBOX, RX, ry, RPW, 22, IDC_STARTUP);
     ry += 36;
@@ -299,11 +351,337 @@ static void ApplyFieldsToSelection(HWND wnd) {
     p->MinimizeEnabled = IsDlgButtonChecked(wnd, IDC_MIN)   == BST_CHECKED;
     p->PauseEnabled    = IsDlgButtonChecked(wnd, IDC_PAUSE) == BST_CHECKED;
 
+    // Save display preset selection
+    HWND cb = GetDlgItem(wnd, IDC_PRESET);
+    if (cb) {
+        int sel = ComboBox_GetCurSel(cb);
+        if (sel <= 0) {
+            p->DisplayPreset[0] = L'\0';
+        } else {
+            // sel==0 is "(none)"; sel 1..N maps to gPresets[sel-1]
+            int pi = sel - 1;
+            if (pi >= 0 && pi < gNumPresets)
+                wcscpy_s(p->DisplayPreset, MAX_NAME, gPresets[pi].Name);
+        }
+    }
+
     SaveConfig();
     EnterCriticalSection(&gHotkeyLock);
     RebuildHotkeys();
     LeaveCriticalSection(&gHotkeyLock);
     RefreshList(wnd);
+}
+
+// ---- Preset editor -------------------------------------------------------
+// Simple modal dialog: list of presets on the left, edit fields on the right.
+// Supports: add preset, delete preset, edit brightness/contrast/colortemp,
+// capture current monitor values.
+
+static int   gPeSelected = -1;   // selected preset index in the editor
+static bool  gPeDone = false;    // set by WM_DESTROY to unblock ShowPresetEditor
+
+// Color temperature combo entries (value == Kelvin, or -1 for "don't change")
+typedef struct { const wchar_t* label; int kelvin; } CtEntry;
+static const CtEntry kCtEntries[] = {
+    { L"(don't change)", -1    },
+    { L"4000K (warm)",   4000  },
+    { L"5000K",          5000  },
+    { L"6500K (daylight)", 6500 },
+    { L"7500K",          7500  },
+    { L"8200K",          8200  },
+    { L"9300K (cool)",   9300  },
+    { L"10000K",         10000 },
+    { L"11500K (cold)",  11500 },
+};
+#define CT_ENTRIES_COUNT ((int)(sizeof(kCtEntries)/sizeof(kCtEntries[0])))
+
+static void PeRefreshList(HWND wnd) {
+    HWND lb = GetDlgItem(wnd, IDC_LIST);
+    int prev = ListBox_GetCurSel(lb);
+    ListBox_ResetContent(lb);
+    for (int i = 0; i < gNumPresets; i++)
+        ListBox_AddString(lb, gPresets[i].Name);
+    if (gNumPresets == 0) { gPeSelected = -1; return; }
+    int sel = (prev >= 0 && prev < gNumPresets) ? prev : 0;
+    ListBox_SetCurSel(lb, sel);
+    gPeSelected = sel;
+}
+
+static void PeLoadFields(HWND wnd, int idx) {
+    gPeSelected = idx;
+    if (idx < 0 || idx >= gNumPresets) {
+        SetDlgItemTextW(wnd, IDC_PE_NAME, L"");
+        SetDlgItemTextW(wnd, IDC_PE_BRIGHT, L"");
+        SetDlgItemTextW(wnd, IDC_PE_CONT, L"");
+        ComboBox_SetCurSel(GetDlgItem(wnd, IDC_PE_CTEMP), 0);
+        return;
+    }
+    DISPLAY_PRESET* p = &gPresets[idx];
+    SetDlgItemTextW(wnd, IDC_PE_NAME, p->Name);
+    wchar_t tmp[32];
+    if (p->Brightness != PRESET_UNSET) {
+        swprintf_s(tmp, _countof(tmp), L"%d", p->Brightness);
+        SetDlgItemTextW(wnd, IDC_PE_BRIGHT, tmp);
+        CheckDlgButton(wnd, IDC_PE_BRIGHT_CHK, BST_CHECKED);
+    } else {
+        SetDlgItemTextW(wnd, IDC_PE_BRIGHT, L"");
+        CheckDlgButton(wnd, IDC_PE_BRIGHT_CHK, BST_UNCHECKED);
+    }
+    if (p->Contrast != PRESET_UNSET) {
+        swprintf_s(tmp, _countof(tmp), L"%d", p->Contrast);
+        SetDlgItemTextW(wnd, IDC_PE_CONT, tmp);
+        CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_CHECKED);
+    } else {
+        SetDlgItemTextW(wnd, IDC_PE_CONT, L"");
+        CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_UNCHECKED);
+    }
+    // Find color temp in combo
+    int ctSel = 0;
+    if (p->ColorTemp != PRESET_UNSET) {
+        for (int i = 0; i < CT_ENTRIES_COUNT; i++) {
+            if (kCtEntries[i].kelvin == p->ColorTemp) { ctSel = i; break; }
+        }
+    }
+    ComboBox_SetCurSel(GetDlgItem(wnd, IDC_PE_CTEMP), ctSel);
+    CheckDlgButton(wnd, IDC_PE_CTEMP_CHK,
+                   p->ColorTemp != PRESET_UNSET ? BST_CHECKED : BST_UNCHECKED);
+}
+
+static void PeSaveFields(HWND wnd) {
+    if (gPeSelected < 0 || gPeSelected >= gNumPresets) return;
+    DISPLAY_PRESET* p = &gPresets[gPeSelected];
+    GetDlgItemTextW(wnd, IDC_PE_NAME, p->Name, MAX_NAME);
+    wchar_t tmp[32];
+    if (IsDlgButtonChecked(wnd, IDC_PE_BRIGHT_CHK) == BST_CHECKED) {
+        GetDlgItemTextW(wnd, IDC_PE_BRIGHT, tmp, _countof(tmp));
+        int v = _wtoi(tmp);
+        p->Brightness = (v < 0) ? 0 : (v > 100) ? 100 : v;
+    } else {
+        p->Brightness = PRESET_UNSET;
+    }
+    if (IsDlgButtonChecked(wnd, IDC_PE_CONT_CHK) == BST_CHECKED) {
+        GetDlgItemTextW(wnd, IDC_PE_CONT, tmp, _countof(tmp));
+        int v = _wtoi(tmp);
+        p->Contrast = (v < 0) ? 0 : (v > 100) ? 100 : v;
+    } else {
+        p->Contrast = PRESET_UNSET;
+    }
+    if (IsDlgButtonChecked(wnd, IDC_PE_CTEMP_CHK) == BST_CHECKED) {
+        int sel = ComboBox_GetCurSel(GetDlgItem(wnd, IDC_PE_CTEMP));
+        if (sel > 0 && sel < CT_ENTRIES_COUNT)
+            p->ColorTemp = kCtEntries[sel].kelvin;
+        else
+            p->ColorTemp = PRESET_UNSET;
+    } else {
+        p->ColorTemp = PRESET_UNSET;
+    }
+}
+
+static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_CREATE: {
+            // Warn about unsupported monitors (once per session)
+            if (!gWarnedUnsupported) {
+                wchar_t names[8][128];
+                int n = DisplayListUnsupported(names, 8);
+                if (n > 0) {
+                    wchar_t buf[2048] = L"The following monitors do not support DDC/CI\n"
+                                        L"(or DDC/CI is disabled in their OSD menu).\n"
+                                        L"Display control will not work for them:\n\n";
+                    for (int i = 0; i < n; i++) {
+                        wcscat_s(buf, _countof(buf), L"  \x2022 ");
+                        wcscat_s(buf, _countof(buf), names[i]);
+                        wcscat_s(buf, _countof(buf), L"\n");
+                    }
+                    wcscat_s(buf, _countof(buf),
+                             L"\nYou may need to enable DDC/CI in the monitor's OSD settings.");
+                    MessageBoxW(wnd, buf, APPNAME L" - Monitor Compatibility",
+                                MB_OK | MB_ICONINFORMATION);
+                    gWarnedUnsupported = true;
+                }
+            }
+
+            // Layout: list on left, edit fields on right
+            int lx = 12, ly = 12, lw = 160, lh = 220;
+            int ex = lx + lw + 12;  // edit area left
+            int ew = 240;           // edit area width
+            int ey = ly;
+
+            // Preset list (ListBox)
+            MakeChild(wnd, L"LISTBOX", L"",
+                LBS_NOTIFY | WS_BORDER | WS_VSCROLL, lx, ly, lw, lh, IDC_LIST);
+            MakeBtn(wnd, L"+ Add",  lx,         ly+lh+6, 74, 26, IDC_ADD);
+            MakeBtn(wnd, L"Delete", lx+74+4,    ly+lh+6, 74, 26, IDC_REMOVE);
+
+            // Edit fields
+            MakeChild(wnd, L"STATIC", L"Name:", SS_RIGHT|SS_CENTERIMAGE,
+                ex, ey+3, 80, 20, 0);
+            MakeChild(wnd, L"EDIT", L"", WS_BORDER|ES_AUTOHSCROLL,
+                ex+84, ey, ew-84, 26, IDC_PE_NAME);
+            ey += 32;
+
+            MakeChild(wnd, L"BUTTON", L"Brightness (0-100%)",
+                BS_AUTOCHECKBOX, ex, ey, ew, 22, IDC_PE_BRIGHT_CHK);
+            ey += 24;
+            MakeChild(wnd, L"EDIT", L"", WS_BORDER|ES_NUMBER|ES_AUTOHSCROLL,
+                ex+20, ey, 60, 24, IDC_PE_BRIGHT);
+            ey += 30;
+
+            MakeChild(wnd, L"BUTTON", L"Contrast (0-100%)",
+                BS_AUTOCHECKBOX, ex, ey, ew, 22, IDC_PE_CONT_CHK);
+            ey += 24;
+            MakeChild(wnd, L"EDIT", L"", WS_BORDER|ES_NUMBER|ES_AUTOHSCROLL,
+                ex+20, ey, 60, 24, IDC_PE_CONT);
+            ey += 30;
+
+            MakeChild(wnd, L"BUTTON", L"Color temperature",
+                BS_AUTOCHECKBOX, ex, ey, ew, 22, IDC_PE_CTEMP_CHK);
+            ey += 24;
+            HWND ctCombo = MakeChild(wnd, L"COMBOBOX", L"",
+                CBS_DROPDOWNLIST|WS_VSCROLL, ex+20, ey, ew-20, 200, IDC_PE_CTEMP);
+            for (int i = 0; i < CT_ENTRIES_COUNT; i++)
+                ComboBox_AddString(ctCombo, kCtEntries[i].label);
+            ComboBox_SetCurSel(ctCombo, 0);
+            ey += 30;
+
+            MakeBtn(wnd, L"Capture from monitor", ex, ey, ew, 26, IDC_PE_CAPTURE);
+            ey += 36;
+
+            MakeBtn(wnd, L"Save & Close", ex, ey, 120, 28, IDC_PE_OK);
+            MakeBtn(wnd, L"Cancel",       ex+124, ey, 80, 28, IDC_PE_CANCEL);
+
+            EnumChildWindows(wnd, ApplyFontEnum, (LPARAM)gUiFont);
+            PeRefreshList(wnd);
+            PeLoadFields(wnd, gPeSelected >= 0 ? gPeSelected : 0);
+            return 0;
+        }
+        case WM_ERASEBKGND: {
+            HDC hdc = (HDC)wp; RECT rc; GetClientRect(wnd, &rc);
+            FillRect(hdc, &rc, gBrBg); return 1;
+        }
+        case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORBTN:
+            return HandleCtlColor(msg, wp, lp);
+        case WM_DRAWITEM: {
+            DRAWITEMSTRUCT* di = (DRAWITEMSTRUCT*)lp;
+            if (di->CtlType == ODT_BUTTON) DrawThemedButton(di);
+            return TRUE;
+        }
+        case WM_COMMAND: {
+            int id = LOWORD(wp), code = HIWORD(wp);
+            // Auto-save when leaving a field
+            if ((id == IDC_PE_NAME || id == IDC_PE_BRIGHT || id == IDC_PE_CONT)
+                && code == EN_KILLFOCUS) {
+                PeSaveFields(wnd);
+                PeRefreshList(wnd);
+            }
+            if ((id == IDC_PE_BRIGHT_CHK || id == IDC_PE_CONT_CHK ||
+                 id == IDC_PE_CTEMP_CHK) && code == BN_CLICKED) {
+                PeSaveFields(wnd);
+            }
+            if (id == IDC_PE_CTEMP && code == CBN_SELCHANGE) {
+                PeSaveFields(wnd);
+            }
+            if (id == IDC_LIST && code == LBN_SELCHANGE) {
+                int sel = ListBox_GetCurSel(GetDlgItem(wnd, IDC_LIST));
+                if (sel >= 0) PeLoadFields(wnd, sel);
+            }
+            if (id == IDC_ADD && code == BN_CLICKED) {
+                // Create a new preset with a default name
+                int idx = GetOrCreatePreset(L"New Preset");
+                if (idx >= 0) { SaveConfig(); PeRefreshList(wnd); PeLoadFields(wnd, idx); }
+            }
+            if (id == IDC_REMOVE && code == BN_CLICKED) {
+                if (gPeSelected >= 0 && gPeSelected < gNumPresets) {
+                    memmove(&gPresets[gPeSelected], &gPresets[gPeSelected+1],
+                            (gNumPresets - gPeSelected - 1) * sizeof(DISPLAY_PRESET));
+                    gNumPresets--;
+                    SaveConfig();
+                    PeRefreshList(wnd);
+                    PeLoadFields(wnd, gPeSelected >= gNumPresets ?
+                                 gNumPresets-1 : gPeSelected);
+                }
+            }
+            if (id == IDC_PE_CAPTURE && code == BN_CLICKED) {
+                // Capture current monitor values into the selected preset
+                if (gPeSelected >= 0 && gPeSelected < gNumPresets) {
+                    DISPLAY_PRESET captured;
+                    if (DisplayCaptureCurrent(NULL, &captured)) {
+                        // Only overwrite fields that were successfully captured
+                        DISPLAY_PRESET* p = &gPresets[gPeSelected];
+                        if (captured.Brightness != PRESET_UNSET) {
+                            p->Brightness = captured.Brightness;
+                            CheckDlgButton(wnd, IDC_PE_BRIGHT_CHK, BST_CHECKED);
+                        }
+                        if (captured.Contrast != PRESET_UNSET) {
+                            p->Contrast = captured.Contrast;
+                            CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_CHECKED);
+                        }
+                        if (captured.ColorTemp != PRESET_UNSET) {
+                            p->ColorTemp = captured.ColorTemp;
+                            CheckDlgButton(wnd, IDC_PE_CTEMP_CHK, BST_CHECKED);
+                        }
+                        PeLoadFields(wnd, gPeSelected);
+                        SaveConfig();
+                        MessageBoxW(wnd, L"Current monitor values captured into preset.",
+                                    APPNAME, MB_OK | MB_ICONINFORMATION);
+                    } else {
+                        MessageBoxW(wnd, L"Could not read monitor values.\n"
+                                    L"Make sure DDC/CI is enabled in the monitor OSD"
+                                    L" and a DDC/CI-capable monitor is connected.",
+                                    APPNAME L" - Capture Failed",
+                                    MB_OK | MB_ICONWARNING);
+                    }
+                }
+            }
+            if (id == IDC_PE_OK && code == BN_CLICKED) {
+                PeSaveFields(wnd);
+                SaveConfig();
+                DestroyWindow(wnd);
+            }
+            if (id == IDC_PE_CANCEL && code == BN_CLICKED) {
+                DestroyWindow(wnd);
+            }
+            return 0;
+        }
+        case WM_CLOSE:   DestroyWindow(wnd); return 0;
+        case WM_DESTROY: gPeDone = true; return 0;
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+static void ShowPresetEditor(HWND parent) {
+    static bool reg = false;
+    if (!reg) {
+        WNDCLASSW wc = { 0 };
+        wc.lpfnWndProc   = PresetEditorProc;
+        wc.hInstance     = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"UAC_PresetEditorWnd";
+        wc.hbrBackground = NULL;
+        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
+        RegisterClassW(&wc);
+        reg = true;
+    }
+    gPeDone = false;
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    RECT r = { 0, 0, 440, 310 };
+    AdjustWindowRectEx(&r, style, FALSE, 0);
+    HWND wnd = CreateWindowExW(0, L"UAC_PresetEditorWnd",
+        APPNAME L" - Edit Display Presets",
+        style, CW_USEDEFAULT, CW_USEDEFAULT,
+        r.right-r.left, r.bottom-r.top,
+        parent, NULL, GetModuleHandleW(NULL), NULL);
+    ShowWindow(wnd, SW_SHOW);
+    EnableWindow(parent, FALSE);
+    MSG m;
+    while (!gPeDone && GetMessageW(&m, NULL, 0, 0)) {
+        if (!IsDialogMessageW(wnd, &m)) {
+            TranslateMessage(&m); DispatchMessageW(&m);
+        }
+        if (!IsWindow(wnd)) break;
+    }
+    if (IsWindow(wnd)) DestroyWindow(wnd);
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
 }
 
 static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -394,6 +772,27 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                     if (code == BN_CLICKED)
                         SetStartupEnabled(IsDlgButtonChecked(wnd, IDC_STARTUP) == BST_CHECKED);
                     break;
+                case IDC_DISPLAYCTL:
+                    if (code == BN_CLICKED) {
+                        gDisplayControlEnabled =
+                            (IsDlgButtonChecked(wnd, IDC_DISPLAYCTL) == BST_CHECKED)
+                            ? TRUE : FALSE;
+                        SaveConfig();
+                        // Enable/disable preset combo
+                        EnableWindow(GetDlgItem(wnd, IDC_PRESET),
+                                     gDisplayControlEnabled);
+                        EnableWindow(GetDlgItem(wnd, IDC_PRESETEDIT),
+                                     gDisplayControlEnabled);
+                    }
+                    break;
+                case IDC_PRESET:
+                    if (code == CBN_SELCHANGE) ApplyFieldsToSelection(wnd);
+                    break;
+                case IDC_PRESETEDIT:
+                    ShowPresetEditor(wnd);
+                    // Refresh combo after editing (presets may have changed)
+                    RefreshPresetCombo(wnd, gSelected);
+                    break;
                 case IDC_OPENINI:  OpenConfigFolder(); break;
                 case IDC_INSTALL:  InstallToUserPrograms(wnd); break;
                 case IDC_ADD: {
@@ -449,7 +848,7 @@ void ShowSettingsWindow(HINSTANCE inst, HWND owner) {
 
     {
         DWORD winStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        RECT wrc = { 0, 0, FX + FW + M, M + LH + 8 + 28 + M };
+        RECT wrc = { 0, 0, FX + FW + M, M + LH + 8 + 28 + M + 60 };  // +60 for display rows
         AdjustWindowRectEx(&wrc, winStyle, FALSE, 0);
         gSettingsWnd = CreateWindowExW(0, L"UAC_SettingsWnd", APPNAME L" v" VERSION L" - Settings",
             winStyle, CW_USEDEFAULT, CW_USEDEFAULT,

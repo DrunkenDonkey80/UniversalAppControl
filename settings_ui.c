@@ -410,6 +410,17 @@ static const CtEntry kCtEntries[] = {
 };
 #define CT_ENTRIES_COUNT ((int)(sizeof(kCtEntries)/sizeof(kCtEntries[0])))
 
+// Update the checkbox label text to show the current slider value.
+static void PeUpdateLabels(HWND wnd) {
+    int b = (int)SendDlgItemMessage(wnd, IDC_PE_BRIGHT, TBM_GETPOS, 0, 0);
+    int c = (int)SendDlgItemMessage(wnd, IDC_PE_CONT,   TBM_GETPOS, 0, 0);
+    wchar_t buf[64];
+    swprintf_s(buf, _countof(buf), L"Brightness: %d%%", b);
+    SetDlgItemTextW(wnd, IDC_PE_BRIGHT_CHK, buf);
+    swprintf_s(buf, _countof(buf), L"Contrast: %d%%", c);
+    SetDlgItemTextW(wnd, IDC_PE_CONT_CHK, buf);
+}
+
 static void PeRefreshList(HWND wnd) {
     HWND lb = GetDlgItem(wnd, IDC_LIST);
     int prev = ListBox_GetCurSel(lb);
@@ -432,6 +443,7 @@ static void PeLoadFields(HWND wnd, int idx) {
         CheckDlgButton(wnd, IDC_PE_CONT_CHK,   BST_UNCHECKED);
         CheckDlgButton(wnd, IDC_PE_CTEMP_CHK,  BST_UNCHECKED);
         ComboBox_SetCurSel(GetDlgItem(wnd, IDC_PE_CTEMP), 0);
+        PeUpdateLabels(wnd);
         return;
     }
     DISPLAY_PRESET* p = &gPresets[idx];
@@ -459,6 +471,7 @@ static void PeLoadFields(HWND wnd, int idx) {
     ComboBox_SetCurSel(GetDlgItem(wnd, IDC_PE_CTEMP), ctSel);
     CheckDlgButton(wnd, IDC_PE_CTEMP_CHK,
                    p->ColorTemp != PRESET_UNSET ? BST_CHECKED : BST_UNCHECKED);
+    PeUpdateLabels(wnd);
 }
 
 static void PeSaveFields(HWND wnd) {
@@ -679,12 +692,17 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             if (id == IDC_PE_APPLY && code == BN_CLICKED) {
                 PeSaveFields(wnd);
                 if (gPeSelected >= 0 && gPeSelected < gNumPresets) {
-                    EnableWindow(wnd, FALSE);
-                    HCURSOR hOld = SetCursor(LoadCursorW(NULL, IDC_WAIT));
-                    DisplayApplyPreset(NULL, &gPresets[gPeSelected]);
-                    SetCursor(hOld);
-                    EnableWindow(wnd, TRUE);
-                    SetForegroundWindow(wnd);
+                    // Always route through the worker thread so DDC/CI never
+                    // runs on the UI thread (concurrent I2C access causes crash).
+                    // force=1 bypasses the gDisplayControlEnabled gate.
+                    EnterCriticalSection(&gHotkeyLock);
+                    gDesiredDisplay.hwnd  = wnd;   // apply to this dialog's monitor
+                    gDesiredDisplay.valid = true;
+                    wcscpy_s(gDesiredDisplay.presetName, MAX_NAME,
+                             gPresets[gPeSelected].Name);
+                    LeaveCriticalSection(&gHotkeyLock);
+                    Job j = { JOB_APPLY_DISPLAY, 1 };  // 1 = force
+                    JobQueuePush(j);
                 }
             }
             if (id == IDC_PE_OK && code == BN_CLICKED) {
@@ -698,10 +716,12 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             return 0;
         }
         case WM_HSCROLL: {
-            // Trackbar (slider) moved — keep gPresets in sync.
+            // Trackbar (slider) moved — keep gPresets in sync and update label.
             int id = GetDlgCtrlID((HWND)lp);
-            if (id == IDC_PE_BRIGHT || id == IDC_PE_CONT)
+            if (id == IDC_PE_BRIGHT || id == IDC_PE_CONT) {
                 PeSaveFields(wnd);
+                PeUpdateLabels(wnd);
+            }
             return 0;
         }
         case WM_CLOSE:   DestroyWindow(wnd); return 0;

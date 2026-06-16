@@ -59,11 +59,13 @@ DWORD WINAPI WorkerThreadProc(LPVOID param) {
                 // Copy the latest desired state atomically, then act on the copy.
                 // This coalesces rapid alt-tab: intermediate states are overwritten
                 // before the worker wakes up.
+                // job.hotkeyIndex == 1 means "force" (ignore gDisplayControlEnabled).
+                bool force = (job.hotkeyIndex == 1);
                 EnterCriticalSection(&gHotkeyLock);
                 DesiredDisplay d = gDesiredDisplay;
                 LeaveCriticalSection(&gHotkeyLock);
 
-                if (!d.valid || !gDisplayControlEnabled) break;
+                if (!d.valid || (!gDisplayControlEnabled && !force)) break;
 
                 // Resolve preset by name; fall back to Default.
                 int pi = FindPresetByName(d.presetName);

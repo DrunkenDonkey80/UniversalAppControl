@@ -426,31 +426,30 @@ static void PeLoadFields(HWND wnd, int idx) {
     gPeSelected = idx;
     if (idx < 0 || idx >= gNumPresets) {
         SetDlgItemTextW(wnd, IDC_PE_NAME, L"");
-        SetDlgItemTextW(wnd, IDC_PE_BRIGHT, L"");
-        SetDlgItemTextW(wnd, IDC_PE_CONT, L"");
+        SendDlgItemMessage(wnd, IDC_PE_BRIGHT, TBM_SETPOS, TRUE, 50);
+        SendDlgItemMessage(wnd, IDC_PE_CONT,   TBM_SETPOS, TRUE, 50);
+        CheckDlgButton(wnd, IDC_PE_BRIGHT_CHK, BST_UNCHECKED);
+        CheckDlgButton(wnd, IDC_PE_CONT_CHK,   BST_UNCHECKED);
+        CheckDlgButton(wnd, IDC_PE_CTEMP_CHK,  BST_UNCHECKED);
         ComboBox_SetCurSel(GetDlgItem(wnd, IDC_PE_CTEMP), 0);
         return;
     }
     DISPLAY_PRESET* p = &gPresets[idx];
     SetDlgItemTextW(wnd, IDC_PE_NAME, p->Name);
-    wchar_t tmp[32];
     if (p->Brightness != PRESET_UNSET) {
-        swprintf_s(tmp, _countof(tmp), L"%d", p->Brightness);
-        SetDlgItemTextW(wnd, IDC_PE_BRIGHT, tmp);
+        SendDlgItemMessage(wnd, IDC_PE_BRIGHT, TBM_SETPOS, TRUE, p->Brightness);
         CheckDlgButton(wnd, IDC_PE_BRIGHT_CHK, BST_CHECKED);
     } else {
-        SetDlgItemTextW(wnd, IDC_PE_BRIGHT, L"");
+        SendDlgItemMessage(wnd, IDC_PE_BRIGHT, TBM_SETPOS, TRUE, 50);
         CheckDlgButton(wnd, IDC_PE_BRIGHT_CHK, BST_UNCHECKED);
     }
     if (p->Contrast != PRESET_UNSET) {
-        swprintf_s(tmp, _countof(tmp), L"%d", p->Contrast);
-        SetDlgItemTextW(wnd, IDC_PE_CONT, tmp);
+        SendDlgItemMessage(wnd, IDC_PE_CONT, TBM_SETPOS, TRUE, p->Contrast);
         CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_CHECKED);
     } else {
-        SetDlgItemTextW(wnd, IDC_PE_CONT, L"");
+        SendDlgItemMessage(wnd, IDC_PE_CONT, TBM_SETPOS, TRUE, 50);
         CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_UNCHECKED);
     }
-    // Find color temp in combo
     int ctSel = 0;
     if (p->ColorTemp != PRESET_UNSET) {
         for (int i = 0; i < CT_ENTRIES_COUNT; i++) {
@@ -466,18 +465,13 @@ static void PeSaveFields(HWND wnd) {
     if (gPeSelected < 0 || gPeSelected >= gNumPresets) return;
     DISPLAY_PRESET* p = &gPresets[gPeSelected];
     GetDlgItemTextW(wnd, IDC_PE_NAME, p->Name, MAX_NAME);
-    wchar_t tmp[32];
     if (IsDlgButtonChecked(wnd, IDC_PE_BRIGHT_CHK) == BST_CHECKED) {
-        GetDlgItemTextW(wnd, IDC_PE_BRIGHT, tmp, _countof(tmp));
-        int v = _wtoi(tmp);
-        p->Brightness = (v < 0) ? 0 : (v > 100) ? 100 : v;
+        p->Brightness = (int)SendDlgItemMessage(wnd, IDC_PE_BRIGHT, TBM_GETPOS, 0, 0);
     } else {
         p->Brightness = PRESET_UNSET;
     }
     if (IsDlgButtonChecked(wnd, IDC_PE_CONT_CHK) == BST_CHECKED) {
-        GetDlgItemTextW(wnd, IDC_PE_CONT, tmp, _countof(tmp));
-        int v = _wtoi(tmp);
-        p->Contrast = (v < 0) ? 0 : (v > 100) ? 100 : v;
+        p->Contrast = (int)SendDlgItemMessage(wnd, IDC_PE_CONT, TBM_GETPOS, 0, 0);
     } else {
         p->Contrast = PRESET_UNSET;
     }
@@ -516,59 +510,82 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 }
             }
 
-            // Layout constants
+            // Layout
             // Left panel: preset list + add/delete buttons
-            // Right panel: name + three attribute rows (checkbox + value side-by-side)
-            int lx = 12, ly = 12, lw = 150, lh = 224;
-            int ex = lx + lw + 14;   // right panel left
+            // Right panel: name, brightness(chk+slider), contrast(chk+slider),
+            //              colortemp(chk+combo), capture, apply, close/cancel
+            int lx = 12, ly = 12, lw = 150;
+            int ex = lx + lw + 14;   // right panel left edge
             int ew = 244;            // right panel width
-            int LBL = 26;            // label/checkbox width portion
-            int VAL = 64;            // value edit width
             int ey = ly;
-            int RH = 28;             // row height
 
-            // Preset list
-            MakeChild(wnd, L"LISTBOX", L"",
-                LBS_NOTIFY | WS_BORDER | WS_VSCROLL, lx, ly, lw, lh, IDC_LIST);
-            MakeBtn(wnd, L"+ Add",  lx,            ly+lh+6,       (lw-4)/2, 26, IDC_ADD);
-            MakeBtn(wnd, L"Delete", lx+(lw-4)/2+4, ly+lh+6,       (lw-4)/2, 26, IDC_REMOVE);
+            // Preset list — height will match right panel, set after layout
+            // (placeholder; actual lh calculated below)
 
             // Name row
             MakeChild(wnd, L"STATIC", L"Name:", SS_RIGHT|SS_CENTERIMAGE,
                 ex, ey+2, 44, 22, 0);
             MakeChild(wnd, L"EDIT", L"", WS_BORDER|ES_AUTOHSCROLL,
                 ex+48, ey, ew-48, 26, IDC_PE_NAME);
-            ey += RH + 4;
+            ey += 32;
 
-            // Brightness row: [checkbox label................] [edit]
-            MakeChild(wnd, L"BUTTON", L"Brightness (0-100%)",
-                BS_AUTOCHECKBOX, ex, ey+2, ew-VAL-8, 22, IDC_PE_BRIGHT_CHK);
-            MakeChild(wnd, L"EDIT", L"", WS_BORDER|ES_NUMBER|ES_AUTOHSCROLL,
-                ex+ew-VAL, ey, VAL, 26, IDC_PE_BRIGHT);
-            ey += RH + 4;
+            // Brightness: checkbox row, then slider row
+            MakeChild(wnd, L"BUTTON", L"Brightness",
+                BS_AUTOCHECKBOX, ex, ey, 100, 22, IDC_PE_BRIGHT_CHK);
+            ey += 24;
+            {
+                HWND sl = MakeChild(wnd, TRACKBAR_CLASSW, L"",
+                    TBS_HORZ|TBS_NOTICKS|TBS_TOOLTIPS,
+                    ex, ey, ew, 24, IDC_PE_BRIGHT);
+                SendMessage(sl, TBM_SETRANGE,   TRUE, MAKELPARAM(0, 100));
+                SendMessage(sl, TBM_SETPOS,     TRUE, 50);
+                SendMessage(sl, TBM_SETPAGESIZE, 0,   5);
+            }
+            ey += 30;
 
-            // Contrast row
-            MakeChild(wnd, L"BUTTON", L"Contrast (0-100%)",
-                BS_AUTOCHECKBOX, ex, ey+2, ew-VAL-8, 22, IDC_PE_CONT_CHK);
-            MakeChild(wnd, L"EDIT", L"", WS_BORDER|ES_NUMBER|ES_AUTOHSCROLL,
-                ex+ew-VAL, ey, VAL, 26, IDC_PE_CONT);
-            ey += RH + 4;
+            // Contrast: checkbox row, then slider row
+            MakeChild(wnd, L"BUTTON", L"Contrast",
+                BS_AUTOCHECKBOX, ex, ey, 100, 22, IDC_PE_CONT_CHK);
+            ey += 24;
+            {
+                HWND sl = MakeChild(wnd, TRACKBAR_CLASSW, L"",
+                    TBS_HORZ|TBS_NOTICKS|TBS_TOOLTIPS,
+                    ex, ey, ew, 24, IDC_PE_CONT);
+                SendMessage(sl, TBM_SETRANGE,   TRUE, MAKELPARAM(0, 100));
+                SendMessage(sl, TBM_SETPOS,     TRUE, 50);
+                SendMessage(sl, TBM_SETPAGESIZE, 0,   5);
+            }
+            ey += 30;
 
-            // Color temperature row: checkbox + dropdown on same line
+            // Color temperature: checkbox + combo on same row
             MakeChild(wnd, L"BUTTON", L"Color temp:",
-                BS_AUTOCHECKBOX, ex, ey+2, 88, 22, IDC_PE_CTEMP_CHK);
+                BS_AUTOCHECKBOX, ex, ey+2, 90, 22, IDC_PE_CTEMP_CHK);
             HWND ctCombo = MakeChild(wnd, L"COMBOBOX", L"",
-                CBS_DROPDOWNLIST|WS_VSCROLL, ex+92, ey, ew-92, 200, IDC_PE_CTEMP);
+                CBS_DROPDOWNLIST|WS_VSCROLL, ex+94, ey, ew-94, 200, IDC_PE_CTEMP);
             for (int i = 0; i < CT_ENTRIES_COUNT; i++)
                 ComboBox_AddString(ctCombo, kCtEntries[i].label);
             ComboBox_SetCurSel(ctCombo, 0);
-            ey += RH + 8;
+            ey += 32;
 
+            // Capture full-width
             MakeBtn(wnd, L"Capture from monitor", ex, ey, ew, 26, IDC_PE_CAPTURE);
-            ey += 36;
+            ey += 34;
 
-            MakeBtn(wnd, L"Close",  ex,        ey, (ew-6)/2, 28, IDC_PE_OK);
-            MakeBtn(wnd, L"Cancel", ex+(ew-6)/2+6, ey, (ew-6)/2, 28, IDC_PE_CANCEL);
+            // Apply full-width (accent color via DrawThemedButton)
+            MakeBtn(wnd, L"Apply to monitor", ex, ey, ew, 26, IDC_PE_APPLY);
+            ey += 34;
+
+            // Close / Cancel split
+            MakeBtn(wnd, L"Close",  ex,              ey, (ew-6)/2, 28, IDC_PE_OK);
+            MakeBtn(wnd, L"Cancel", ex+(ew-6)/2+6,   ey, (ew-6)/2, 28, IDC_PE_CANCEL);
+            ey += 28;
+
+            // Now create the list to match the right panel height
+            int lh = ey - ly - 34;  // leave room for Add/Delete below
+            MakeChild(wnd, L"LISTBOX", L"",
+                LBS_NOTIFY | WS_BORDER | WS_VSCROLL, lx, ly, lw, lh, IDC_LIST);
+            MakeBtn(wnd, L"+ Add",  lx,            ly+lh+6, (lw-4)/2, 26, IDC_ADD);
+            MakeBtn(wnd, L"Delete", lx+(lw-4)/2+4, ly+lh+6, (lw-4)/2, 26, IDC_REMOVE);
 
             EnumChildWindows(wnd, ApplyFontEnum, (LPARAM)gUiFont);
             PeRefreshList(wnd);
@@ -588,9 +605,8 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
         }
         case WM_COMMAND: {
             int id = LOWORD(wp), code = HIWORD(wp);
-            // Auto-save when leaving a field
-            if ((id == IDC_PE_NAME || id == IDC_PE_BRIGHT || id == IDC_PE_CONT)
-                && code == EN_KILLFOCUS) {
+            // Auto-save name on focus-out
+            if (id == IDC_PE_NAME && code == EN_KILLFOCUS) {
                 PeSaveFields(wnd);
                 PeRefreshList(wnd);
             }
@@ -660,6 +676,17 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                     }
                 }
             }
+            if (id == IDC_PE_APPLY && code == BN_CLICKED) {
+                PeSaveFields(wnd);
+                if (gPeSelected >= 0 && gPeSelected < gNumPresets) {
+                    EnableWindow(wnd, FALSE);
+                    HCURSOR hOld = SetCursor(LoadCursorW(NULL, IDC_WAIT));
+                    DisplayApplyPreset(NULL, &gPresets[gPeSelected]);
+                    SetCursor(hOld);
+                    EnableWindow(wnd, TRUE);
+                    SetForegroundWindow(wnd);
+                }
+            }
             if (id == IDC_PE_OK && code == BN_CLICKED) {
                 PeSaveFields(wnd);
                 SaveConfig();
@@ -668,6 +695,13 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             if (id == IDC_PE_CANCEL && code == BN_CLICKED) {
                 DestroyWindow(wnd);
             }
+            return 0;
+        }
+        case WM_HSCROLL: {
+            // Trackbar (slider) moved — keep gPresets in sync.
+            int id = GetDlgCtrlID((HWND)lp);
+            if (id == IDC_PE_BRIGHT || id == IDC_PE_CONT)
+                PeSaveFields(wnd);
             return 0;
         }
         case WM_CLOSE:   DestroyWindow(wnd); return 0;
@@ -690,7 +724,7 @@ static void ShowPresetEditor(HWND parent) {
     }
     gPeDone = false;
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
-    RECT r = { 0, 0, 440, 310 };
+    RECT r = { 0, 0, 440, 370 };
     AdjustWindowRectEx(&r, style, FALSE, 0);
     HWND wnd = CreateWindowExW(0, L"UAC_PresetEditorWnd",
         APPNAME L" - Edit Display Presets",
@@ -854,7 +888,7 @@ void ShowSettingsWindow(HINSTANCE inst, HWND owner) {
 
     InitTheme();
 
-    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES };
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
 
     static bool registered = false;

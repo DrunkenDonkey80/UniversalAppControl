@@ -36,8 +36,8 @@
 
 // Preset editor dialog
 #define IDC_PE_NAME    3210   // preset name edit
-#define IDC_PE_BRIGHT  3211   // brightness spinner (edit)
-#define IDC_PE_CONT    3212   // contrast spinner (edit)
+#define IDC_PE_BRIGHT  3211   // brightness slider (trackbar)
+#define IDC_PE_CONT    3212   // contrast slider (trackbar)
 #define IDC_PE_CTEMP   3213   // color temp combo
 #define IDC_PE_CAPTURE 3214   // "Capture current" button
 #define IDC_PE_OK      3215
@@ -45,3 +45,4 @@
 #define IDC_PE_BRIGHT_CHK  3217  // "set brightness" checkbox
 #define IDC_PE_CONT_CHK    3218  // "set contrast" checkbox
 #define IDC_PE_CTEMP_CHK   3219  // "set color temp" checkbox
+#define IDC_PE_APPLY       3220  // "Apply to monitor" test button

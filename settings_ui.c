@@ -7,6 +7,7 @@
 #include "worker.h"
 #include "display.h"
 #include <commctrl.h>
+#include <windowsx.h>
 #include <shlwapi.h>
 #pragma comment(lib, "Shlwapi.lib")
 #include <tlhelp32.h>

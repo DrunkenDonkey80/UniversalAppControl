@@ -865,6 +865,30 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 	return(Result);
 }
 
+// ---------------------------------------------------------------------------
+//  Crash logger: catches unhandled exceptions and writes a report to %TEMP%
+// ---------------------------------------------------------------------------
+static FILE* gCrashLog = NULL;
+
+void CrashLog(const char* fmt, ...) {
+    if (!gCrashLog) return;
+    va_list a; va_start(a, fmt); vfprintf(gCrashLog, fmt, a); va_end(a);
+    fflush(gCrashLog);
+}
+
+static LONG WINAPI UnhandledCrash(EXCEPTION_POINTERS* ep) {
+    CrashLog("*** UNHANDLED EXCEPTION ***\n");
+    CrashLog("  Code    : 0x%08X\n", (unsigned)ep->ExceptionRecord->ExceptionCode);
+    CrashLog("  Address : %p\n",              ep->ExceptionRecord->ExceptionAddress);
+    CrashLog("  Flags   : 0x%08X\n", (unsigned)ep->ExceptionRecord->ExceptionFlags);
+    if (ep->ExceptionRecord->NumberParameters > 0)
+        CrashLog("  Info[0] : 0x%p\n", (void*)ep->ExceptionRecord->ExceptionInformation[0]);
+    if (ep->ExceptionRecord->NumberParameters > 1)
+        CrashLog("  Info[1] : 0x%p\n", (void*)ep->ExceptionRecord->ExceptionInformation[1]);
+    if (gCrashLog) { fclose(gCrashLog); gCrashLog = NULL; }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _In_ PWSTR CmdLine, _In_ int CmdShow)
 {
 	for (int ai = 1; ai < __argc; ai++) {
@@ -872,6 +896,15 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 			return RunSelfTests();
 		if (lstrcmpiW(__wargv[ai], L"--monitor-debug") == 0)
 			return RunMonitorDebug();
+	}
+
+	// Install crash logger
+	{
+		char p[MAX_PATH]; GetTempPathA(MAX_PATH, p);
+		strcat_s(p, MAX_PATH, "uac-crash.txt");
+		fopen_s(&gCrashLog, p, "w");
+		SetUnhandledExceptionFilter(UnhandledCrash);
+		CrashLog("=== UAC crash log started ===\n");
 	}
 
 	bool autostart = false;

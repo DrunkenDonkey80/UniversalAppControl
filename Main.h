@@ -80,6 +80,7 @@ typedef struct _PROFILE_CONFIG
 // Function declarations.
 void MsgBox(const wchar_t* Message, const wchar_t* Caption, u32 Flags, ...);
 void DbgPrint(const wchar_t* Message, ...);
+void CrashLog(const char* fmt, ...);   // always-on step log -> %TEMP%\uac-crash.txt
 LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARAM WParam, _In_ LPARAM LParam);
 
 extern CONFIG gConfig;

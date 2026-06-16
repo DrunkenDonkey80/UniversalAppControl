@@ -690,8 +690,14 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 }
             }
             if (id == IDC_PE_APPLY && code == BN_CLICKED) {
+                CrashLog("[ui] Apply clicked gPeSelected=%d gNumPresets=%d\n",
+                         gPeSelected, gNumPresets);
                 PeSaveFields(wnd);
                 if (gPeSelected >= 0 && gPeSelected < gNumPresets) {
+                    CrashLog("[ui] preset B=%d C=%d CT=%d\n",
+                             gPresets[gPeSelected].Brightness,
+                             gPresets[gPeSelected].Contrast,
+                             gPresets[gPeSelected].ColorTemp);
                     // Always route through the worker thread so DDC/CI never
                     // runs on the UI thread (concurrent I2C access causes crash).
                     // force=1 bypasses the gDisplayControlEnabled gate.
@@ -702,7 +708,9 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                              gPresets[gPeSelected].Name);
                     LeaveCriticalSection(&gHotkeyLock);
                     Job j = { JOB_APPLY_DISPLAY, 1 };  // 1 = force
+                    CrashLog("[ui] pushing JOB_APPLY_DISPLAY force=1\n");
                     JobQueuePush(j);
+                    CrashLog("[ui] job pushed ok\n");
                 }
             }
             if (id == IDC_PE_OK && code == BN_CLICKED) {

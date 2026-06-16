@@ -251,9 +251,12 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
 
 bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
     if (!preset) return false;
+    CrashLog("[display] ApplyPreset enter hwnd=%p B=%d C=%d CT=%d\n",
+             (void*)hwnd, preset->Brightness, preset->Contrast, preset->ColorTemp);
 
     PHYSICAL_MONITOR pms[MAX_PHYSICAL_PER_HMONITOR];
     DWORD n = OpenPhysicalsForHwnd(hwnd, pms, MAX_PHYSICAL_PER_HMONITOR);
+    CrashLog("[display] OpenPhysicalsForHwnd -> n=%lu\n", n);
     if (n == 0) {
         DbgPrint(L"[display] ApplyPreset: no physical monitors found");
         return false;
@@ -266,6 +269,7 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
         wchar_t id[128];
         MakeDevId(pms[pi].szPhysicalMonitorDescription, (int)pi, id, 128);
 
+        CrashLog("[display] physical[%lu] caps probe...\n", pi);
         // Phase 1: read state under lock (quick — no DDC/CI here)
         DWORD caps        = 0;
         bool  firstTouch  = false;
@@ -282,6 +286,7 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
             firstTouch = !gMon[si].hasSnapshot;
         }
         LeaveCriticalSection(&gMonLock);
+        CrashLog("[display] physical[%lu] caps=0x%08lX firstTouch=%d\n", pi, caps, firstTouch);
 
         // Phase 2: DDC/CI work — performed WITHOUT holding gMonLock.
         // gMonLock guards gMon[] state only; I2C bus access is serialised
@@ -293,6 +298,7 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
         DWORD cMin=0, cOrig=0, cMax=0;
         DWORD ctOrig = 0;
 
+        CrashLog("[display] physical[%lu] trying brightness...\n", pi);
         if (preset->Brightness != PRESET_UNSET && (caps & MC_CAPS_BRIGHTNESS)) {
             DWORD mn=0, cur=0, mx=0;
             BOOL got = FALSE;
@@ -312,6 +318,7 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
             }
         }
 
+        CrashLog("[display] physical[%lu] trying contrast...\n", pi);
         if (preset->Contrast != PRESET_UNSET && (caps & MC_CAPS_CONTRAST)) {
             DWORD mn=0, cur=0, mx=0;
             BOOL got = FALSE;
@@ -331,6 +338,7 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
             }
         }
 
+        CrashLog("[display] physical[%lu] trying colortemp...\n", pi);
         if (preset->ColorTemp != PRESET_UNSET &&
             (caps & MC_CAPS_COLOR_TEMPERATURE)) {
             MC_COLOR_TEMPERATURE ctCur = MC_COLOR_TEMPERATURE_UNKNOWN;
@@ -365,6 +373,7 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
     }
 
     DestroyPhysicalMonitors(n, pms);
+    CrashLog("[display] ApplyPreset done anySet=%d\n", anySet);
     return anySet;
 }
 

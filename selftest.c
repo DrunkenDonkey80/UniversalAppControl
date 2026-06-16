@@ -3,7 +3,10 @@
 #include <string.h>
 #include <physicalmonitorenumerationapi.h>
 #include <highlevelmonitorconfigurationapi.h>
+#include <objbase.h>
+#include "display.h"
 #pragma comment(lib, "Dxva2.lib")
+#pragma comment(lib, "ole32.lib")
 #include "selftest.h"
 #include "config.h"
 #include "worker.h"
@@ -124,22 +127,33 @@ int RunSelfTests(void) {
 //  Monitor debug
 // ---------------------------------------------------------------------------
 
-static const wchar_t* CtName(MC_COLOR_TEMPERATURE ct) {
+static FILE* gMdLog = NULL;   // log file handle, set inside RunMonitorDebug
+
+// L() writes to the log file (always flushed after each line so a crash
+// doesn't swallow the last entry).
+static void MdLog(const char* fmt, ...) {
+    if (!gMdLog) return;
+    va_list a; va_start(a, fmt);
+    vfprintf(gMdLog, fmt, a);
+    va_end(a);
+    fflush(gMdLog);
+}
+
+static const char* CtName(MC_COLOR_TEMPERATURE ct) {
     switch (ct) {
-        case MC_COLOR_TEMPERATURE_UNKNOWN:  return L"UNKNOWN";
-        case MC_COLOR_TEMPERATURE_4000K:    return L"4000K";
-        case MC_COLOR_TEMPERATURE_5000K:    return L"5000K";
-        case MC_COLOR_TEMPERATURE_6500K:    return L"6500K";
-        case MC_COLOR_TEMPERATURE_7500K:    return L"7500K";
-        case MC_COLOR_TEMPERATURE_8200K:    return L"8200K";
-        case MC_COLOR_TEMPERATURE_9300K:    return L"9300K";
-        case MC_COLOR_TEMPERATURE_10000K:   return L"10000K";
-        case MC_COLOR_TEMPERATURE_11500K:   return L"11500K";
-        default:                            return L"<invalid>";
+        case MC_COLOR_TEMPERATURE_UNKNOWN:  return "UNKNOWN";
+        case MC_COLOR_TEMPERATURE_4000K:    return "4000K";
+        case MC_COLOR_TEMPERATURE_5000K:    return "5000K";
+        case MC_COLOR_TEMPERATURE_6500K:    return "6500K";
+        case MC_COLOR_TEMPERATURE_7500K:    return "7500K";
+        case MC_COLOR_TEMPERATURE_8200K:    return "8200K";
+        case MC_COLOR_TEMPERATURE_9300K:    return "9300K";
+        case MC_COLOR_TEMPERATURE_10000K:   return "10000K";
+        case MC_COLOR_TEMPERATURE_11500K:   return "11500K";
+        default:                            return "<invalid>";
     }
 }
 
-typedef struct { HMONITOR hm; int idx; } MonEnum;
 static HMONITOR gDbgHmons[16];
 static int      gDbgHmonCount = 0;
 
@@ -149,181 +163,265 @@ static BOOL CALLBACK DbgMonitorEnum(HMONITOR hm, HDC hdc, LPRECT r, LPARAM lp) {
     return TRUE;
 }
 
-// Macro: print the call name, flush stdout, then run the call.
-// The flush ensures the label appears even if the call hard-crashes.
-#define STEP(label) do { wprintf(L"  >> " label L"... "); fflush(stdout); } while(0)
-#define OK          wprintf(L"OK\n")
-#define FAIL(r)     wprintf(L"FAILED (0x%08X)\n", (unsigned)(r))
-#define SEH_OK      wprintf(L"OK (via __try)\n")
-#define SEH_CRASH(c) wprintf(L"EXCEPTION 0x%08X\n", (unsigned)(c))
+// --- Thread-safety test state ---
+static volatile BOOL gTtDone   = FALSE;
+static volatile BOOL gTtResult = FALSE;
+static DISPLAY_PRESET gTtPreset;  // shared with test threads
+
+static DWORD WINAPI BgThreadNoComProc(LPVOID p) {
+    (void)p;
+    MdLog("[BgThread-NoCOM] start, calling DisplayApplyPreset...\n");
+    BOOL r = DisplayApplyPreset(NULL, &gTtPreset);
+    MdLog("[BgThread-NoCOM] returned %d\n", r);
+    gTtResult = r; gTtDone = TRUE;
+    return 0;
+}
+
+static DWORD WINAPI BgThreadWithComProc(LPVOID p) {
+    (void)p;
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    MdLog("[BgThread-WithCOM] CoInitializeEx hr=0x%08X\n", (unsigned)hr);
+    BOOL r = DisplayApplyPreset(NULL, &gTtPreset);
+    MdLog("[BgThread-WithCOM] returned %d\n", r);
+    CoUninitialize();
+    gTtResult = r; gTtDone = TRUE;
+    return 0;
+}
+
+// STEP: log label and flush BEFORE the call; result logged AFTER.
+// If the process crashes, the log shows the last STEP that ran.
+#define STEP(s)      MdLog("  >> " s "... ")
+#define OK_          MdLog("OK\n")
+#define FAIL_(e)     MdLog("FAILED  err=0x%08X\n", (unsigned)(e))
+#define CRASH_(c)    MdLog("SEH EXCEPTION 0x%08X\n", (unsigned)(c))
 
 int RunMonitorDebug(void) {
-    AllocConsole();
-    FILE* f; freopen_s(&f, "CONOUT$", "w", stdout);
-    setvbuf(stdout, NULL, _IONBF, 0);  // unbuffered: every wprintf appears immediately
+    char logPath[MAX_PATH];
+    GetTempPathA(MAX_PATH, logPath);
+    strcat_s(logPath, MAX_PATH, "uac-monitor-debug.txt");
+    fopen_s(&gMdLog, logPath, "w");
+    if (!gMdLog) return 1;
 
-    wprintf(L"=== UniversalAppControl -- Monitor DDC/CI Debug ===\n");
-    wprintf(L"This test steps through every DDC/CI call individually.\n");
-    wprintf(L"The LAST line printed before a crash is the culprit.\n\n");
+    MdLog("=== UniversalAppControl Monitor DDC/CI Debug ===\n");
+    MdLog("Log: %s\n", logPath);
+    MdLog("Each DDC/CI call is logged BEFORE it runs.\n");
+    MdLog("Last line before a crash = the culprit.\n\n");
 
-    // Enumerate HMONITORs
     gDbgHmonCount = 0;
     EnumDisplayMonitors(NULL, NULL, DbgMonitorEnum, 0);
-    wprintf(L"Found %d HMONITOR(s).\n\n", gDbgHmonCount);
+    MdLog("HMONITORs found: %d\n\n", gDbgHmonCount);
 
     for (int mi = 0; mi < gDbgHmonCount; mi++) {
         HMONITOR hm = gDbgHmons[mi];
-        wprintf(L"--- HMONITOR %d (handle %p) ---\n", mi, (void*)hm);
+        MdLog("--- HMONITOR[%d] %p ---\n", mi, (void*)hm);
 
-        MONITORINFOEXW info;
-        info.cbSize = sizeof(info);
-        if (GetMonitorInfoW(hm, (MONITORINFO*)&info))
-            wprintf(L"  Device: %s  %s\n", info.szDevice,
-                    (info.dwFlags & MONITORINFOF_PRIMARY) ? L"(primary)" : L"");
+        MONITORINFOEXW info; info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(hm, (MONITORINFO*)&info)) {
+            char dev[64]; WideCharToMultiByte(CP_ACP,0,info.szDevice,-1,dev,64,0,0);
+            MdLog("  Device: %s  %s\n", dev,
+                  (info.dwFlags & MONITORINFOF_PRIMARY) ? "(primary)" : "");
+        }
 
-        // Physical monitor count
+        // Physical count
         DWORD nPhys = 0;
-        STEP(L"GetNumberOfPhysicalMonitorsFromHMONITOR");
-        BOOL ok = GetNumberOfPhysicalMonitorsFromHMONITOR(hm, &nPhys);
-        if (ok) { wprintf(L"OK  count=%lu\n", nPhys); }
-        else    { FAIL(GetLastError()); continue; }
+        STEP("GetNumberOfPhysicalMonitorsFromHMONITOR");
+        if (!GetNumberOfPhysicalMonitorsFromHMONITOR(hm, &nPhys)) {
+            FAIL_(GetLastError()); continue;
+        }
+        MdLog("OK  count=%lu\n", nPhys);
 
         PHYSICAL_MONITOR* pms = (PHYSICAL_MONITOR*)malloc(nPhys * sizeof(PHYSICAL_MONITOR));
-        if (!pms) { wprintf(L"  malloc failed\n"); continue; }
+        if (!pms) { MdLog("  malloc failed\n"); continue; }
 
-        STEP(L"GetPhysicalMonitorsFromHMONITOR");
-        ok = GetPhysicalMonitorsFromHMONITOR(hm, nPhys, pms);
-        if (!ok) { FAIL(GetLastError()); free(pms); continue; }
-        OK;
+        STEP("GetPhysicalMonitorsFromHMONITOR");
+        if (!GetPhysicalMonitorsFromHMONITOR(hm, nPhys, pms)) {
+            FAIL_(GetLastError()); free(pms); continue;
+        }
+        OK_;
 
         for (DWORD pi = 0; pi < nPhys; pi++) {
             HANDLE h = pms[pi].hPhysicalMonitor;
-            wprintf(L"\n  Physical[%lu]: \"%s\"  handle=%p\n",
-                    pi, pms[pi].szPhysicalMonitorDescription, (void*)h);
+            char desc[128]; WideCharToMultiByte(CP_ACP,0,pms[pi].szPhysicalMonitorDescription,-1,desc,128,0,0);
+            MdLog("\n  Physical[%lu]: \"%s\"  handle=%p\n", pi, desc, (void*)h);
 
-            // --- Capabilities ---
+            // Capabilities
             DWORD caps = 0, colorCaps = 0;
-            STEP(L"GetMonitorCapabilities");
-            ok = GetMonitorCapabilities(h, &caps, &colorCaps);
-            if (ok) {
-                wprintf(L"OK\n");
-                wprintf(L"    caps=0x%08lX  colorCaps=0x%08lX\n", caps, colorCaps);
-                wprintf(L"    Brightness:       %s\n", (caps & MC_CAPS_BRIGHTNESS)        ? L"YES" : L"no");
-                wprintf(L"    Contrast:         %s\n", (caps & MC_CAPS_CONTRAST)          ? L"YES" : L"no");
-                wprintf(L"    ColorTemperature: %s\n", (caps & MC_CAPS_COLOR_TEMPERATURE)  ? L"YES" : L"no");
-            } else {
-                FAIL(GetLastError());
-                caps = 0;
-            }
+            STEP("GetMonitorCapabilities");
+            if (GetMonitorCapabilities(h, &caps, &colorCaps)) {
+                MdLog("OK  caps=0x%08lX  colorCaps=0x%08lX\n", caps, colorCaps);
+                MdLog("    Brightness:       %s\n", (caps & MC_CAPS_BRIGHTNESS)       ? "YES" : "no");
+                MdLog("    Contrast:         %s\n", (caps & MC_CAPS_CONTRAST)         ? "YES" : "no");
+                MdLog("    ColorTemp:        %s\n", (caps & MC_CAPS_COLOR_TEMPERATURE) ? "YES" : "no");
+            } else { FAIL_(GetLastError()); caps = 0; }
 
-            // --- Capabilities string (optional, some monitors support it) ---
+            // Capability string
             DWORD capLen = 0;
-            STEP(L"GetCapabilitiesStringLength");
+            STEP("GetCapabilitiesStringLength");
             if (GetCapabilitiesStringLength(h, &capLen) && capLen > 0 && capLen < 4096) {
-                wprintf(L"OK  len=%lu\n", capLen);
-                char* capStr = (char*)malloc(capLen + 1);
-                if (capStr) {
-                    STEP(L"CapabilitiesRequestAndCapabilitiesReply");
-                    if (CapabilitiesRequestAndCapabilitiesReply(h, capStr, capLen)) {
-                        capStr[capLen] = 0;
-                        wprintf(L"OK  \"%.120hs...\"\n", capStr);
-                    } else { FAIL(GetLastError()); }
-                    free(capStr);
+                MdLog("OK  len=%lu\n", capLen);
+                char* cs = (char*)malloc(capLen + 2);
+                if (cs) {
+                    STEP("CapabilitiesRequestAndCapabilitiesReply");
+                    if (CapabilitiesRequestAndCapabilitiesReply(h, cs, capLen)) {
+                        cs[capLen] = 0;
+                        MdLog("OK  \"%.200s\"\n", cs);
+                    } else { FAIL_(GetLastError()); }
+                    free(cs);
                 }
-            } else {
-                wprintf(L"n/a (len=%lu err=0x%08X)\n", capLen, GetLastError());
-            }
+            } else { MdLog("n/a (len=%lu err=0x%08X)\n", capLen, GetLastError()); }
 
-            // --- Brightness ---
-            DWORD bMin=0, bCur=0, bMax=0;
-            wprintf(L"\n  [Brightness]\n");
-            STEP(L"GetMonitorBrightness");
-            DWORD seh = 0;
+            // Brightness
+            DWORD bMin=0, bCur=0, bMax=0; BOOL ok; DWORD seh;
+            MdLog("\n  [Brightness]\n");
+            STEP("GetMonitorBrightness"); seh=0;
             __try { ok = GetMonitorBrightness(h, &bMin, &bCur, &bMax); }
-            __except(seh = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
-            if (seh) { SEH_CRASH(seh); }
-            else if (ok) { wprintf(L"OK  cur=%lu  min=%lu  max=%lu\n", bCur, bMin, bMax); }
-            else { FAIL(GetLastError()); }
+            __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
+            if (seh) CRASH_(seh);
+            else if (ok) MdLog("OK  cur=%lu  min=%lu  max=%lu\n", bCur, bMin, bMax);
+            else FAIL_(GetLastError());
 
-            if (ok && bCur >= bMin && bCur <= bMax) {
-                STEP(L"SetMonitorBrightness (same value, no visual change)");
-                seh = 0;
+            if (ok) {
+                STEP("SetMonitorBrightness(cur)"); seh=0;
                 __try { ok = SetMonitorBrightness(h, bCur); }
-                __except(seh = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
-                if (seh) { SEH_CRASH(seh); }
-                else if (ok) { OK; }
-                else { FAIL(GetLastError()); }
+                __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
+                if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
             }
 
-            // --- Contrast ---
+            // Contrast
             DWORD cMin=0, cCur=0, cMax=0;
-            wprintf(L"\n  [Contrast]\n");
-            STEP(L"GetMonitorContrast");
-            seh = 0;
+            MdLog("\n  [Contrast]\n");
+            STEP("GetMonitorContrast"); seh=0;
             __try { ok = GetMonitorContrast(h, &cMin, &cCur, &cMax); }
-            __except(seh = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
-            if (seh) { SEH_CRASH(seh); }
-            else if (ok) { wprintf(L"OK  cur=%lu  min=%lu  max=%lu\n", cCur, cMin, cMax); }
-            else { FAIL(GetLastError()); }
+            __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
+            if (seh) CRASH_(seh);
+            else if (ok) MdLog("OK  cur=%lu  min=%lu  max=%lu\n", cCur, cMin, cMax);
+            else FAIL_(GetLastError());
 
-            if (ok && cCur >= cMin && cCur <= cMax) {
-                STEP(L"SetMonitorContrast (same value, no visual change)");
-                seh = 0;
+            if (ok) {
+                STEP("SetMonitorContrast(cur)"); seh=0;
                 __try { ok = SetMonitorContrast(h, cCur); }
-                __except(seh = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
-                if (seh) { SEH_CRASH(seh); }
-                else if (ok) { OK; }
-                else { FAIL(GetLastError()); }
+                __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
+                if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
             }
 
-            // --- Color temperature (always try, even without MC_CAPS flag) ---
-            wprintf(L"\n  [Color Temperature]\n");
+            // Color temperature - try unconditionally even if not in caps
             MC_COLOR_TEMPERATURE ct = MC_COLOR_TEMPERATURE_UNKNOWN;
-            STEP(L"GetMonitorColorTemperature (unconditional - ignoring caps)");
-            seh = 0;
+            MdLog("\n  [Color Temperature]  (caps flag: %s)\n",
+                  (caps & MC_CAPS_COLOR_TEMPERATURE) ? "YES" : "no");
+            STEP("GetMonitorColorTemperature"); seh=0;
             __try { ok = GetMonitorColorTemperature(h, &ct); }
-            __except(seh = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
-            if (seh) { SEH_CRASH(seh); }
-            else if (ok) { wprintf(L"OK  ct=%s (%d)\n", CtName(ct), (int)ct); }
-            else { wprintf(L"FAILED (0x%08X) -- monitor likely doesn't support color temp\n", GetLastError()); }
+            __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
+            if (seh) CRASH_(seh);
+            else if (ok) MdLog("OK  ct=%s (%d)\n", CtName(ct), (int)ct);
+            else MdLog("FAILED (0x%08X) -- not supported\n", GetLastError());
 
             if (ok && ct != MC_COLOR_TEMPERATURE_UNKNOWN) {
-                STEP(L"SetMonitorColorTemperature (same value, no visual change)");
-                seh = 0;
+                STEP("SetMonitorColorTemperature(cur)"); seh=0;
                 __try { ok = SetMonitorColorTemperature(h, ct); }
-                __except(seh = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
-                if (seh) { SEH_CRASH(seh); }
-                else if (ok) { OK; }
-                else { FAIL(GetLastError()); }
+                __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
+                if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
             }
 
-            // --- Combined: brightness + contrast + colortemp in one shot ---
-            wprintf(L"\n  [Combined: B+C+CT in sequence (same as Apply-all)]\n");
-            STEP(L"SetMonitorBrightness"); seh=0;
+            // Combined sequence: B then C then CT
+            MdLog("\n  [Combined B+C+CT sequence]\n");
+            STEP("SetMonitorBrightness"); seh=0;
             __try { ok = SetMonitorBrightness(h, bCur); }
-            __except(seh = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) { ok=FALSE; }
-            if (seh) SEH_CRASH(seh); else if (ok) OK; else FAIL(GetLastError());
+            __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
+            if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
 
-            STEP(L"SetMonitorContrast"); seh=0;
+            STEP("SetMonitorContrast"); seh=0;
             __try { ok = SetMonitorContrast(h, cCur); }
-            __except(seh = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) { ok=FALSE; }
-            if (seh) SEH_CRASH(seh); else if (ok) OK; else FAIL(GetLastError());
+            __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
+            if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
 
             if (ct != MC_COLOR_TEMPERATURE_UNKNOWN) {
-                STEP(L"SetMonitorColorTemperature (after B+C)"); seh=0;
+                STEP("SetMonitorColorTemperature (after B+C)"); seh=0;
                 __try { ok = SetMonitorColorTemperature(h, ct); }
-                __except(seh = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) { ok=FALSE; }
-                if (seh) SEH_CRASH(seh); else if (ok) OK; else FAIL(GetLastError());
+                __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
+                if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
             }
+            MdLog("  Combined sequence complete.\n");
         }
 
         DestroyPhysicalMonitors(nPhys, pms);
         free(pms);
-        wprintf(L"\n");
     }
 
-    wprintf(L"\n=== Done. Press Enter to exit. ===\n");
-    fflush(stdout);
-    getchar();
+    // --- Thread-safety test ---
+    // Prove that DDC/CI works (or fails) from a background thread,
+    // both with and without COM initialized — mimics the worker thread path.
+    MdLog("\n--- Thread-safety test (mimics worker thread) ---\n");
+
+    DisplayInit();
+    MdLog("DisplayInit() done\n");
+
+    // Build preset from current values so Apply has no visible effect
+    memset(&gTtPreset, 0, sizeof(gTtPreset));
+    wcscpy_s(gTtPreset.Name, MAX_NAME, L"__thread_test__");
+    gTtPreset.Brightness = PRESET_UNSET;
+    gTtPreset.Contrast   = PRESET_UNSET;
+    gTtPreset.ColorTemp  = PRESET_UNSET;
+    if (gDbgHmonCount > 0) {
+        PHYSICAL_MONITOR pm[MAX_PHYSICAL_PER_HMONITOR]; DWORD nc = 0;
+        if (GetNumberOfPhysicalMonitorsFromHMONITOR(gDbgHmons[0], &nc) && nc > 0
+            && GetPhysicalMonitorsFromHMONITOR(gDbgHmons[0], nc, pm)) {
+            DWORD mn, cur, mx;
+            if (GetMonitorBrightness(pm[0].hPhysicalMonitor, &mn, &cur, &mx) && mx > mn) {
+                int pct = (int)(cur * 100 / mx);
+                // Offset by +1 so Set* is actually called (not a no-op)
+                gTtPreset.Brightness = (pct >= 100) ? pct - 1 : pct + 1;
+                MdLog("  Brightness actual=%d%%, preset=%d%% (to force Set call)\n",
+                      pct, gTtPreset.Brightness);
+            }
+            if (GetMonitorContrast(pm[0].hPhysicalMonitor, &mn, &cur, &mx) && mx > mn) {
+                int pct = (int)(cur * 100 / mx);
+                gTtPreset.Contrast = (pct >= 100) ? pct - 1 : pct + 1;
+                MdLog("  Contrast   actual=%d%%, preset=%d%% (to force Set call)\n",
+                      pct, gTtPreset.Contrast);
+            }
+            DestroyPhysicalMonitors(nc, pm);
+        }
+    }
+    int bOrig = gTtPreset.Brightness - 1;  // original value (we added +1 above)
+    int cOrig = gTtPreset.Contrast   - 1;
+    MdLog("Preset B=%d C=%d CT=%d  (original B=%d C=%d)\n",
+          gTtPreset.Brightness, gTtPreset.Contrast, gTtPreset.ColorTemp,
+          bOrig, cOrig);
+
+    // Test 1: main thread, apply +1 offset
+    MdLog("\nTest1: MAIN THREAD  set B=%d C=%d ...\n",
+          gTtPreset.Brightness, gTtPreset.Contrast);
+    bool r1 = DisplayApplyPreset(NULL, &gTtPreset);
+    MdLog("Test1: %s  (expected OK - Set must be called)\n", r1 ? "OK (Set called)" : "no-op UNEXPECTED");
+
+    // Test 2: background thread, NO COM -- restore original values (B-1, C-1)
+    // After Test1 the monitor is at +1; setting back to original calls Set* again.
+    gTtPreset.Brightness = bOrig;
+    gTtPreset.Contrast   = cOrig;
+    MdLog("\nTest2: BACKGROUND THREAD (no COM)  set B=%d C=%d ...\n",
+          gTtPreset.Brightness, gTtPreset.Contrast);
+    gTtDone = FALSE; gTtResult = FALSE;
+    HANDLE t2 = CreateThread(NULL, 0, BgThreadNoComProc, NULL, 0, NULL);
+    if (t2) { WaitForSingleObject(t2, 15000); CloseHandle(t2); }
+    MdLog("Test2: %s\n",
+          gTtDone ? (gTtResult ? "OK (Set called from bg thread!)" : "no-op UNEXPECTED")
+                  : "TIMED OUT / CRASHED");
+
+    // Test 3: background thread, WITH COM -- bump back to +1
+    gTtPreset.Brightness = bOrig + 1;
+    gTtPreset.Contrast   = cOrig + 1;
+    MdLog("\nTest3: BACKGROUND THREAD (with COM)  set B=%d C=%d ...\n",
+          gTtPreset.Brightness, gTtPreset.Contrast);
+    gTtDone = FALSE; gTtResult = FALSE;
+    HANDLE t3 = CreateThread(NULL, 0, BgThreadWithComProc, NULL, 0, NULL);
+    if (t3) { WaitForSingleObject(t3, 15000); CloseHandle(t3); }
+    MdLog("Test3: %s\n",
+          gTtDone ? (gTtResult ? "OK (Set called from bg thread with COM!)" : "no-op UNEXPECTED")
+                  : "TIMED OUT / CRASHED");
+
+    DisplayRestoreAll();
+    MdLog("DisplayRestoreAll() done - monitor brightness/contrast restored\n");
+    MdLog("\n=== COMPLETE ===\n");
+    fclose(gMdLog); gMdLog = NULL;
     return 0;
 }

@@ -1,6 +1,7 @@
 #include "worker.h"
 #include "Main.h"
 #include "config.h"
+#include "display.h"
 
 #define JOB_QUEUE_CAP 256
 static Job gQueue[JOB_QUEUE_CAP];
@@ -52,6 +53,26 @@ DWORD WINAPI WorkerThreadProc(LPVOID param) {
                 EnterCriticalSection(&gHotkeyLock);
                 LoadConfig();
                 LeaveCriticalSection(&gHotkeyLock);
+                break;
+            }
+            case JOB_APPLY_DISPLAY: {
+                // Copy the latest desired state atomically, then act on the copy.
+                // This coalesces rapid alt-tab: intermediate states are overwritten
+                // before the worker wakes up.
+                EnterCriticalSection(&gHotkeyLock);
+                DesiredDisplay d = gDesiredDisplay;
+                LeaveCriticalSection(&gHotkeyLock);
+
+                if (!d.valid || !gDisplayControlEnabled) break;
+
+                // Resolve preset by name; fall back to Default.
+                int pi = FindPresetByName(d.presetName);
+                if (pi < 0) pi = FindPresetByName(gDefaultPresetName);
+                if (pi < 0) break;  // no preset defined yet
+
+                DbgPrint(L"[worker] ApplyDisplay preset='%s' hwnd=%p",
+                         gPresets[pi].Name, (void*)d.hwnd);
+                DisplayApplyPreset(d.hwnd, &gPresets[pi]);
                 break;
             }
             case JOB_SHUTDOWN:       return 0;

@@ -38,6 +38,8 @@ int            gNumPresets = 0;
 BOOL           gDisplayControlEnabled = FALSE;
 wchar_t        gDefaultPresetName[MAX_NAME] = L"Default";
 
+DesiredDisplay gDesiredDisplay;   // guarded by gHotkeyLock
+
 typedef struct _HotkeyInfo
 {
 	u32 HotKey;
@@ -1034,6 +1036,9 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 		}
 		gProfiles[i].NumHiddenWindows = 0;
 	}
+
+	// Restore all monitors we adjusted to their original values.
+	DisplayRestoreAll();
 
 Exit:
 	// Unhook the hook before exiting

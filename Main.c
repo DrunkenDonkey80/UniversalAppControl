@@ -45,6 +45,7 @@ typedef struct _HotkeyInfo
 
 HotkeyInfo gHotkeys[MAX_PROFILES + 1];
 int gNumHotkeys = 0;
+static bool gHotkeyHeld[MAX_PROFILES + 1];  // autorepeat suppression; cleared on hotkey rebuild
 
 u32 gPausedProcesses[MAX_PROFILES * MAX_PROCESSES_PER_PROFILE];
 int gNumPausedProcesses=0;
@@ -166,6 +167,7 @@ void UnregisterHotkeys() {
 		UnregisterHotKey(NULL, i);
 
 	gNumHotkeys = 0;
+	memset(gHotkeyHeld, 0, sizeof(gHotkeyHeld));
 }
 
 void RebuildHotkeys(void) {
@@ -725,35 +727,27 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
  		if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN || wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
 			bool down = wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN;
 
-			//DbgPrint(L"Key Pressed: %d enter\n", pKeyboard->vkCode);
-
 			WORD vkCode = pKeyboard->vkCode;                           // virtual-key code
 
-			WORD keyFlags = pKeyboard->flags;
-
-			//WORD scanCode = LOBYTE(keyFlags);                             // scan code
-			//BOOL isExtendedKey = (keyFlags & KF_EXTENDED) == KF_EXTENDED; // extended-key flag, 1 if scancode has 0xE0 prefix
-
-			//if (isExtendedKey)
-			//	scanCode = MAKEWORD(scanCode, 0xE0);
-
-			BOOL wasKeyDown = (keyFlags & KF_REPEAT) == KF_REPEAT;        // previous key-state flag, 1 on autorepeat
-			//WORD repeatCount = LOWORD(lParam);                            // repeat count, > 0 if several keydown messages was combined into one message
-
-			BOOL isKeyReleased = (keyFlags & KF_UP) == KF_UP;             // transition-state flag, 1 on keyup
+			// KBDLLHOOKSTRUCT.flags uses LLKHF_* bit layout (different from KF_* in WM_KEYDOWN lParam).
+			// Bit 7 (0x80 = LLKHF_UP): 1 if key released, 0 if pressed.
+			// There is no repeat bit in KBDLLHOOKSTRUCT; repeat is tracked manually below.
+			BOOL isKeyReleased = (pKeyboard->flags & LLKHF_UP) != 0;
 
 			DWORD32 t = GetTickCount();
-			DbgPrint(L"Key %s: wasDown:%d, released: %d Enter\n", down ? L"pressed" : L"released", wasKeyDown, isKeyReleased);
-
+			DbgPrint(L"Key %s: released:%d Enter\n", down ? L"pressed" : L"released", isKeyReleased);
 
 			//search for hotkey for that VK
 			EnterCriticalSection(&gHotkeyLock);
 			int matchIndex = -1;
 			for (int i = 0; i < gNumHotkeys; i++) {
 				if (gHotkeys[i].HotKey == vkCode) {
-					BOOL shift = GetKeyState(VK_SHIFT) & 0x8000;
-					BOOL ctrl  = GetKeyState(VK_CONTROL) & 0x8000;
-					BOOL alt   = GetKeyState(VK_MENU) & 0x8000;
+					// Use GetAsyncKeyState for modifiers: it reflects actual hardware state,
+					// unlike GetKeyState which depends on the thread's message-queue processing
+					// and can lag in LL hook context (causing missed hotkeys in some apps).
+					BOOL shift = GetAsyncKeyState(VK_SHIFT) & 0x8000;
+					BOOL ctrl  = GetAsyncKeyState(VK_CONTROL) & 0x8000;
+					BOOL alt   = GetAsyncKeyState(VK_MENU) & 0x8000;
 					u32 modifiers = (shift ? MOD_SHIFT : 0) | (ctrl ? MOD_CONTROL : 0) | (alt ? MOD_ALT : 0);
 					if (gHotkeys[i].Modifiers == modifiers) { matchIndex = i; break; }
 				}
@@ -761,13 +755,16 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			LeaveCriticalSection(&gHotkeyLock);
 
 			if (matchIndex >= 0) {
-				if (down && !wasKeyDown) {
+				if (down && !gHotkeyHeld[matchIndex]) {
+					gHotkeyHeld[matchIndex] = true;
 					Job j = { JOB_TOGGLE_HOTKEY, matchIndex };
 					JobQueuePush(j);
+				} else if (!down) {
+					gHotkeyHeld[matchIndex] = false;
 				}
 				return 1;
 			}
-			DbgPrint(L"Key %s: wasDown:%d, released: %d Exit, time taken: %d\n", down ? L"pressed" : L"released", wasKeyDown, isKeyReleased, (GetTickCount() - t));
+			DbgPrint(L"Key %s: released:%d Exit, time taken: %d\n", down ? L"pressed" : L"released", isKeyReleased, (GetTickCount() - t));
 		}
 	}
 
@@ -969,13 +966,17 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	while (gIsRunning)
 	{
 		while (PeekMessageW(&WndMsg, NULL, 0, 0, PM_REMOVE)) {
+			if (WndMsg.message == WM_QUIT) { gIsRunning = FALSE; break; }
 			if (gSettingsWnd && IsDialogMessageW(gSettingsWnd, &WndMsg))
 				continue;
 			TranslateMessage(&WndMsg);
 			DispatchMessageW(&WndMsg);
 		}
 
-		Sleep(5);
+		// MsgWaitForMultipleObjects instead of Sleep(5): the thread wakes immediately
+		// when any message (including LL keyboard hook callbacks) arrives, rather than
+		// blocking up to 5 ms. Sleep() cannot process hook callbacks at all while blocked.
+		MsgWaitForMultipleObjects(0, NULL, FALSE, 5, QS_ALLINPUT);
 	}
 
 	{ Job j = { JOB_SHUTDOWN, 0 }; JobQueuePush(j); }
@@ -989,15 +990,14 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	if (gNumPausedProcesses > 0) Sleep(50);
 	gNumPausedProcesses = 0;
 
-	// Restore all windows we hid or minimized
+	// On exit: only un-hide windows that were fully hidden (SW_HIDE).
+	// Windows that were merely minimized are left as-is — the user didn't ask us to restore them.
 	for (int i = 0; i < gNumProfiles; i++) {
-		for (int j = 0; j < gProfiles[i].NumHiddenWindows; j++) {
-			HWND hw = gProfiles[i].HiddenWindows[j];
-			if (IsWindow(hw)) {
-				if (gProfiles[i].HideEnabled)
+		if (gProfiles[i].HideEnabled) {
+			for (int j = 0; j < gProfiles[i].NumHiddenWindows; j++) {
+				HWND hw = gProfiles[i].HiddenWindows[j];
+				if (IsWindow(hw))
 					ShowWindow(hw, SW_SHOW);
-				else if (gProfiles[i].MinimizeEnabled)
-					ShowWindow(hw, SW_RESTORE);
 			}
 		}
 		gProfiles[i].NumHiddenWindows = 0;

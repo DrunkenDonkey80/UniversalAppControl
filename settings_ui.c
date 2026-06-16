@@ -451,7 +451,7 @@ void ShowSettingsWindow(HINSTANCE inst, HWND owner) {
         DWORD winStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
         RECT wrc = { 0, 0, FX + FW + M, M + LH + 8 + 28 + M };
         AdjustWindowRectEx(&wrc, winStyle, FALSE, 0);
-        gSettingsWnd = CreateWindowExW(0, L"UAC_SettingsWnd", APPNAME L" - Settings",
+        gSettingsWnd = CreateWindowExW(0, L"UAC_SettingsWnd", APPNAME L" v" VERSION L" - Settings",
             winStyle, CW_USEDEFAULT, CW_USEDEFAULT,
             wrc.right - wrc.left, wrc.bottom - wrc.top,
             owner, NULL, inst, NULL);

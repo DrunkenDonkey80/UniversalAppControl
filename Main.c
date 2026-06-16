@@ -929,6 +929,8 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 
 	InitializeCriticalSection(&gHotkeyLock);
 	WorkerInit();
+	DisplayInit();   // must be called before worker thread starts
+	CrashLog("[main] DisplayInit done\n");
 	workerThread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, NULL);
 	if (workerThread == NULL) {
 		MsgBox(L"Failed to start worker thread!", APPNAME L" Error", MB_OK | MB_ICONERROR);

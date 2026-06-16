@@ -29,6 +29,22 @@ extern _HungWindowFromGhostWindow HungWindowFromGhostWindow;
 #define MAX_PROFILES 20
 #define MAX_PROCESSES_PER_PROFILE 40
 #define MAX_NAME 128
+#define MAX_PRESETS 16
+#define PRESET_UNSET (-1)   // sentinel: "leave this attribute unchanged"
+
+// ---------------------------------------------------------------------------
+//  Display preset: a named set of monitor settings applied automatically
+//  when a linked app profile is in the foreground.
+//  Each field is 0-100 percent (brightness/contrast) or a Kelvin value
+//  (colortemp); PRESET_UNSET means "don't touch this attribute".
+// ---------------------------------------------------------------------------
+typedef struct _DISPLAY_PRESET
+{
+	wchar_t Name[MAX_NAME];
+	int Brightness;   // 0-100 percent, or PRESET_UNSET
+	int Contrast;     // 0-100 percent, or PRESET_UNSET
+	int ColorTemp;    // Kelvin (4000/5000/6500/7500/8200/9300/10000/11500), or PRESET_UNSET
+} DISPLAY_PRESET;
 
 
 // Configurable registry settings.
@@ -57,6 +73,8 @@ typedef struct _PROFILE_CONFIG
 	int NumHiddenWindows;
 
 	HWND ForegroundWindow;
+
+	wchar_t DisplayPreset[MAX_NAME]; // name of the DISPLAY_PRESET to apply, or L"" for none
 } PROFILE_CONFIG;
 
 // Function declarations.
@@ -67,6 +85,10 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 extern CONFIG gConfig;
 extern PROFILE_CONFIG gProfiles[MAX_PROFILES];
 extern int gNumProfiles;
+extern DISPLAY_PRESET gPresets[MAX_PRESETS];
+extern int  gNumPresets;
+extern BOOL gDisplayControlEnabled;   // [general] DisplayControl
+extern wchar_t gDefaultPresetName[MAX_NAME]; // [general] DefaultPreset
 extern BOOL gIsRunning;
 extern HANDLE gMutex;
 extern NOTIFYICONDATA gTrayNotifyIconData;

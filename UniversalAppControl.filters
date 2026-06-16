@@ -15,6 +15,9 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="display.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="resource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -54,6 +57,9 @@
     </Image>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="display.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Main.c">
       <Filter>Source Files</Filter>
     </ClCompile>

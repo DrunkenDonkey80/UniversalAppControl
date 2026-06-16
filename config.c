@@ -84,6 +84,26 @@ void FormatHotkey(u32 vk, UINT mods, wchar_t* out, int cch) {
     if (name) wcscat_s(out, cch, name);
 }
 
+int FindPresetByName(const wchar_t* name) {
+    if (!name || !name[0]) return -1;
+    for (int i = 0; i < gNumPresets; i++)
+        if (_wcsicmp(gPresets[i].Name, name) == 0) return i;
+    return -1;
+}
+
+int GetOrCreatePreset(const wchar_t* name) {
+    int i = FindPresetByName(name);
+    if (i >= 0) return i;
+    if (gNumPresets >= MAX_PRESETS) return -1;
+    i = gNumPresets++;
+    memset(&gPresets[i], 0, sizeof(gPresets[i]));
+    wcscpy_s(gPresets[i].Name, MAX_NAME, name);
+    gPresets[i].Brightness = PRESET_UNSET;
+    gPresets[i].Contrast   = PRESET_UNSET;
+    gPresets[i].ColorTemp  = PRESET_UNSET;
+    return i;
+}
+
 static void WriteBool(const wchar_t* section, const wchar_t* key, BOOL v) {
     WritePrivateProfileStringW(section, key, v ? L"true" : L"false", GetConfigPath());
 }
@@ -94,6 +114,27 @@ void SaveConfig(void) {
     DeleteFileW(path);
 
     WriteBool(L"general", L"Debug", gConfig.Debug);
+    WriteBool(L"general", L"DisplayControl", gDisplayControlEnabled);
+    WritePrivateProfileStringW(L"general", L"DefaultPreset", gDefaultPresetName, path);
+
+    // Write display presets
+    for (int i = 0; i < gNumPresets; i++) {
+        wchar_t section[MAX_NAME + 8];
+        swprintf_s(section, _countof(section), L"preset:%s", gPresets[i].Name);
+        wchar_t tmp[32];
+        if (gPresets[i].Brightness != PRESET_UNSET) {
+            swprintf_s(tmp, _countof(tmp), L"%d", gPresets[i].Brightness);
+            WritePrivateProfileStringW(section, L"Brightness", tmp, path);
+        }
+        if (gPresets[i].Contrast != PRESET_UNSET) {
+            swprintf_s(tmp, _countof(tmp), L"%d", gPresets[i].Contrast);
+            WritePrivateProfileStringW(section, L"Contrast", tmp, path);
+        }
+        if (gPresets[i].ColorTemp != PRESET_UNSET) {
+            swprintf_s(tmp, _countof(tmp), L"%d", gPresets[i].ColorTemp);
+            WritePrivateProfileStringW(section, L"ColorTemp", tmp, path);
+        }
+    }
 
     for (int i = 0; i < gNumProfiles; i++) {
         PROFILE_CONFIG* p = &gProfiles[i];
@@ -109,5 +150,8 @@ void SaveConfig(void) {
         WriteBool(section, L"Hide", p->HideEnabled);
         WriteBool(section, L"Minimize", p->MinimizeEnabled);
         WriteBool(section, L"Pause", p->PauseEnabled);
+        if (p->DisplayPreset[0])
+            WritePrivateProfileStringW(section, L"DisplayPreset",
+                                       p->DisplayPreset, path);
     }
 }

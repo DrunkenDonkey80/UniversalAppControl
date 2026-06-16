@@ -22,6 +22,7 @@
 #include "settings_ui.h"
 #include "install.h"
 #include "selftest.h"
+#include "display.h"
 
 _NtSuspendProcess NtSuspendProcess;
 _NtResumeProcess NtResumeProcess;
@@ -31,6 +32,11 @@ CONFIG gConfig;
 
 PROFILE_CONFIG gProfiles[MAX_PROFILES];
 int gNumProfiles = 0;
+
+DISPLAY_PRESET gPresets[MAX_PRESETS];
+int            gNumPresets = 0;
+BOOL           gDisplayControlEnabled = FALSE;
+wchar_t        gDefaultPresetName[MAX_NAME] = L"Default";
 
 typedef struct _HotkeyInfo
 {
@@ -221,6 +227,10 @@ static bool ReadConfig() {
 	UnregisterHotkeys();
 	memset(gProfiles, 0, sizeof(gProfiles));
 	gNumProfiles = 0;
+	memset(gPresets, 0, sizeof(gPresets));
+	gNumPresets = 0;
+	gDisplayControlEnabled = FALSE;
+	wcscpy_s(gDefaultPresetName, MAX_NAME, L"Default");
 
 	// Maximum buffer size for section names
 	wchar_t buffer[32767] = { 0 };
@@ -239,12 +249,33 @@ static bool ReadConfig() {
 	while (*sectionName) {
 		if (!lstrcmpi(sectionName, L"general")) {
 			gConfig.Debug = ReadConfigBool(sectionName, L"Debug", false);
-
 			if (gConfig.Debug)
 				EnableDebugConsole();
-
+			gDisplayControlEnabled = ReadConfigBool(sectionName, L"DisplayControl", false);
+			ReadConfigString(sectionName, L"DefaultPreset", gDefaultPresetName);
+			if (!gDefaultPresetName[0])
+				wcscpy_s(gDefaultPresetName, MAX_NAME, L"Default");
 		}
-		else if (gNumProfiles < MAX_PROFILES) {
+		else if (wcsncmp(sectionName, L"preset:", 7) == 0 && gNumPresets < MAX_PRESETS) {
+			// --- Display preset section ---
+			const wchar_t* presetName = sectionName + 7;  // skip "preset:"
+			wcscpy_s(gPresets[gNumPresets].Name, MAX_NAME, presetName);
+			// Read raw values; -1 sentinel means unset
+			wchar_t tmp[64] = { 0 };
+			gPresets[gNumPresets].Brightness = PRESET_UNSET;
+			gPresets[gNumPresets].Contrast   = PRESET_UNSET;
+			gPresets[gNumPresets].ColorTemp  = PRESET_UNSET;
+			if (GetPrivateProfileStringW(sectionName, L"Brightness", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
+				gPresets[gNumPresets].Brightness = _wtoi(tmp);
+			memset(tmp, 0, sizeof(tmp));
+			if (GetPrivateProfileStringW(sectionName, L"Contrast", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
+				gPresets[gNumPresets].Contrast = _wtoi(tmp);
+			memset(tmp, 0, sizeof(tmp));
+			if (GetPrivateProfileStringW(sectionName, L"ColorTemp", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
+				gPresets[gNumPresets].ColorTemp = _wtoi(tmp);
+			gNumPresets++;
+		}
+		else if (wcsncmp(sectionName, L"preset:", 7) != 0 && gNumProfiles < MAX_PROFILES) {
 			//profile
 			RegisterConfigHotkey(sectionName, L"Hotkey", gNumProfiles);
 
@@ -255,6 +286,7 @@ static bool ReadConfig() {
 			ReadConfigString(sectionName, L"ProgramExeName", gProfiles[gNumProfiles].ProgramExeName);
 			ReadConfigString(sectionName, L"ProgramPath", gProfiles[gNumProfiles].ProgramPath);
 			ReadConfigList(sectionName, L"WindowNames", '|', &gProfiles[gNumProfiles].WindowNames, &gProfiles[gNumProfiles].NumWindows);
+			ReadConfigString(sectionName, L"DisplayPreset", gProfiles[gNumProfiles].DisplayPreset);
 
 			gNumProfiles++;
 		}

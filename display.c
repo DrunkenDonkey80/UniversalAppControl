@@ -266,74 +266,90 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
         wchar_t id[128];
         MakeDevId(pms[pi].szPhysicalMonitorDescription, (int)pi, id, 128);
 
+        // Phase 1: read state under lock (quick — no DDC/CI here)
+        DWORD caps        = 0;
+        bool  firstTouch  = false;
         EnterCriticalSection(&gMonLock);
-
         int si = GetOrAddMon(id);
-        // Re-probe caps lazily if missing
-        if (si >= 0 && gMon[si].caps == 0) {
-            DWORD c = 0, col = 0;
-            if (!GetMonitorCapabilities(h, &c, &col)) c = 0;
-            gMon[si].caps = c;
+        if (si >= 0) {
+            if (gMon[si].caps == 0) {
+                // Lazy probe: GetMonitorCapabilities is fast and not I2C-intensive
+                DWORD c = 0, col = 0;
+                if (!GetMonitorCapabilities(h, &c, &col)) c = 0;
+                gMon[si].caps = c;
+            }
+            caps       = gMon[si].caps;
+            firstTouch = !gMon[si].hasSnapshot;
         }
-        DWORD caps = (si >= 0) ? gMon[si].caps : 0;
+        LeaveCriticalSection(&gMonLock);
 
-        // ---- Brightness ----
+        // Phase 2: DDC/CI work — performed WITHOUT holding gMonLock.
+        // gMonLock guards gMon[] state only; I2C bus access is serialised
+        // by the single worker thread (all Apply/poll jobs run on it).
+        // Each Set* call is wrapped in __try/__except because some monitor
+        // drivers throw SEH exceptions (hardware faults) on specific
+        // command sequences.
+        DWORD bMin=0, bOrig=0, bMax=0;
+        DWORD cMin=0, cOrig=0, cMax=0;
+        DWORD ctOrig = 0;
+
         if (preset->Brightness != PRESET_UNSET && (caps & MC_CAPS_BRIGHTNESS)) {
-            DWORD mn = 0, cur = 0, mx = 0;
+            DWORD mn=0, cur=0, mx=0;
             if (GetMonitorBrightness(h, &mn, &cur, &mx)) {
-                if (si >= 0 && !gMon[si].hasSnapshot) {
-                    gMon[si].bMin  = mn;
-                    gMon[si].bOrig = cur;
-                    gMon[si].bMax  = mx;
-                }
+                if (firstTouch) { bMin=mn; bOrig=cur; bMax=mx; }
                 DWORD want = PctToRaw(preset->Brightness, mn, mx);
                 if (want != cur) {
-                    SetMonitorBrightness(h, want);
-                    anySet = true;
-                    DbgPrint(L"[display] '%s' brightness %lu%%->%lu%%",
-                             id, RawToPct(cur,mn,mx), preset->Brightness);
+                    __try { SetMonitorBrightness(h, want); anySet = true; }
+                    __except(EXCEPTION_EXECUTE_HANDLER) {
+                        DbgPrint(L"[display] SEH 0x%08x in SetMonitorBrightness",
+                                 GetExceptionCode());
+                    }
                 }
             }
         }
 
-        // ---- Contrast ----
         if (preset->Contrast != PRESET_UNSET && (caps & MC_CAPS_CONTRAST)) {
-            DWORD mn = 0, cur = 0, mx = 0;
+            DWORD mn=0, cur=0, mx=0;
             if (GetMonitorContrast(h, &mn, &cur, &mx)) {
-                if (si >= 0 && !gMon[si].hasSnapshot) {
-                    gMon[si].cMin  = mn;
-                    gMon[si].cOrig = cur;
-                    gMon[si].cMax  = mx;
-                }
+                if (firstTouch) { cMin=mn; cOrig=cur; cMax=mx; }
                 DWORD want = PctToRaw(preset->Contrast, mn, mx);
                 if (want != cur) {
-                    SetMonitorContrast(h, want);
-                    anySet = true;
-                    DbgPrint(L"[display] '%s' contrast %lu%%->%lu%%",
-                             id, RawToPct(cur,mn,mx), preset->Contrast);
+                    __try { SetMonitorContrast(h, want); anySet = true; }
+                    __except(EXCEPTION_EXECUTE_HANDLER) {
+                        DbgPrint(L"[display] SEH 0x%08x in SetMonitorContrast",
+                                 GetExceptionCode());
+                    }
                 }
             }
         }
 
-        // ---- Color temperature ----
         if (preset->ColorTemp != PRESET_UNSET &&
             (caps & MC_CAPS_COLOR_TEMPERATURE)) {
             MC_COLOR_TEMPERATURE ctCur = MC_COLOR_TEMPERATURE_UNKNOWN;
             if (GetMonitorColorTemperature(h, &ctCur)) {
-                if (si >= 0 && !gMon[si].hasSnapshot)
-                    gMon[si].origColorTemp = (DWORD)ctCur;
+                if (firstTouch) ctOrig = (DWORD)ctCur;
                 MC_COLOR_TEMPERATURE ctNew = KelvinToCt(preset->ColorTemp);
                 if (ctNew != MC_COLOR_TEMPERATURE_UNKNOWN && ctNew != ctCur) {
-                    SetMonitorColorTemperature(h, ctNew);
-                    anySet = true;
-                    DbgPrint(L"[display] '%s' colortemp->%dK",
-                             id, preset->ColorTemp);
+                    __try { SetMonitorColorTemperature(h, ctNew); anySet = true; }
+                    __except(EXCEPTION_EXECUTE_HANDLER) {
+                        DbgPrint(L"[display] SEH 0x%08x in SetMonitorColorTemperature",
+                                 GetExceptionCode());
+                    }
                 }
             }
         }
 
-        if (si >= 0) gMon[si].hasSnapshot = true;
-        LeaveCriticalSection(&gMonLock);
+        // Phase 3: write snapshot back under lock
+        if (firstTouch && si >= 0) {
+            EnterCriticalSection(&gMonLock);
+            if (!gMon[si].hasSnapshot) {  // re-check: another thread might have set it
+                if (bMax > bMin) { gMon[si].bMin=bMin; gMon[si].bOrig=bOrig; gMon[si].bMax=bMax; }
+                if (cMax > cMin) { gMon[si].cMin=cMin; gMon[si].cOrig=cOrig; gMon[si].cMax=cMax; }
+                if (ctOrig)        gMon[si].origColorTemp = ctOrig;
+                gMon[si].hasSnapshot = true;
+            }
+            LeaveCriticalSection(&gMonLock);
+        }
     }
 
     DestroyPhysicalMonitors(n, pms);

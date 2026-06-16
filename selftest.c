@@ -341,6 +341,32 @@ int RunMonitorDebug(void) {
                 if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
             }
             MdLog("  Combined sequence complete.\n");
+
+            // --- VCP 0x14 low-level color preset ---
+            MdLog("\n  [VCP 0x14 Color Preset (low-level DDC/CI)]\n");
+            {
+                DWORD vcpType=0, vcpCur=0, vcpMax=0;
+                BOOL vok = FALSE; int vseh = 0;
+                STEP("GetVCPFeatureAndVCPFeatureReply(0x14)"); vseh=0;
+                __try { vok = GetVCPFeatureAndVCPFeatureReply(h, 0x14, &vcpType, &vcpCur, &vcpMax); }
+                __except(vseh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER) { vok=FALSE; }
+                if (vseh) { CRASH_(vseh); }
+                else if (vok) {
+                    const char* ctNames[] = {"?","sRGB","Native","4000K","5000K","6500K","7500K","8200K","9300K","10000K","11500K","Custom"};
+                    MdLog(" OK  cur=0x%02lX (%s) max=%lu\n", vcpCur,
+                          (vcpCur < 12) ? ctNames[vcpCur] : "?", vcpMax);
+
+                    // Idempotent write: set same value back
+                    BOOL sok = FALSE; vseh=0;
+                    STEP("SetVCPFeature(0x14, cur)");
+                    __try { sok = SetVCPFeature(h, 0x14, vcpCur); }
+                    __except(vseh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER) { sok=FALSE; }
+                    if (vseh) CRASH_(vseh);
+                    else if (sok) OK_;
+                    else FAIL_(GetLastError());
+                }
+                else { MdLog(" FAILED  err=0x%lx (no VCP 0x14 support)\n", GetLastError()); }
+            }
         }
 
         DestroyPhysicalMonitors(nPhys, pms);

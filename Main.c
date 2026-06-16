@@ -1044,6 +1044,59 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 			DispatchMessageW(&WndMsg);
 		}
 
+		// Foreground-app polling for display presets (~400 ms).
+		// Detect which app is in focus, find its profile's DisplayPreset,
+		// and push JOB_APPLY_DISPLAY so the worker updates the monitor.
+		if (gDisplayControlEnabled) {
+			static HWND  sFgLast   = NULL;
+			static DWORD sFgPollMs = 0;
+			DWORD tNow = GetTickCount();
+			if (tNow - sFgPollMs >= 400) {
+				sFgPollMs = tNow;
+				HWND fg = GetForegroundWindow();
+				if (fg != sFgLast) {
+					sFgLast = fg;
+					// Find which preset applies: scan profiles by exe name.
+					wchar_t presetName[MAX_NAME] = {0};
+					if (fg) {
+						DWORD pid = 0;
+						GetWindowThreadProcessId(fg, &pid);
+						HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+						if (hp) {
+							wchar_t exePath[MAX_PATH] = {0};
+							DWORD sz = MAX_PATH;
+							if (QueryFullProcessImageNameW(hp, 0, exePath, &sz)) {
+								wchar_t* slash = wcsrchr(exePath, L'\\');
+								wchar_t* exeFile = slash ? slash + 1 : exePath;
+								for (int i = 0; i < gNumProfiles; i++) {
+									if (gProfiles[i].ProgramExeName[0] &&
+									    _wcsicmp(gProfiles[i].ProgramExeName, exeFile) == 0 &&
+									    gProfiles[i].DisplayPreset[0]) {
+										wcscpy_s(presetName, MAX_NAME, gProfiles[i].DisplayPreset);
+										break;
+									}
+								}
+							}
+							CloseHandle(hp);
+						}
+					}
+					// Fall back to default preset when no profile matched
+					if (!presetName[0] && gDefaultPresetName[0])
+						wcscpy_s(presetName, MAX_NAME, gDefaultPresetName);
+
+					if (presetName[0]) {
+						EnterCriticalSection(&gHotkeyLock);
+						gDesiredDisplay.hwnd  = fg ? fg : GetDesktopWindow();
+						gDesiredDisplay.valid = true;
+						wcscpy_s(gDesiredDisplay.presetName, MAX_NAME, presetName);
+						LeaveCriticalSection(&gHotkeyLock);
+						Job jd = { JOB_APPLY_DISPLAY, 0 };
+						JobQueuePush(jd);
+					}
+				}
+			}
+		}
+
 		// MsgWaitForMultipleObjects instead of Sleep(5): the thread wakes immediately
 		// when any message (including LL keyboard hook callbacks) arrives, rather than
 		// blocking up to 5 ms. Sleep() cannot process hook callbacks at all while blocked.

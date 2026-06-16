@@ -10,6 +10,7 @@
 #include <Windows.h>
 #include <physicalmonitorenumerationapi.h>
 #include <highlevelmonitorconfigurationapi.h>
+#include <lowlevelmonitorconfigurationapi.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,7 +31,8 @@ typedef struct {
     // Original values snapshotted at first touch
     DWORD   bMin, bOrig, bMax;     // brightness
     DWORD   cMin, cOrig, cMax;     // contrast
-    DWORD   origColorTemp;         // MC_COLOR_TEMPERATURE enum value
+    DWORD   origColorTemp;         // MC_COLOR_TEMPERATURE enum value (high-level, may be 0)
+    DWORD   origVcp14;             // VCP 0x14 raw value (low-level color preset, 0=unknown)
     bool    hasSnapshot;
 } MonEntry;
 
@@ -42,6 +44,19 @@ static bool              gMonInited  = false;
 // -----------------------------------------------------------------------
 //  Internal helpers
 // -----------------------------------------------------------------------
+
+// Map Kelvin → VCP 0x14 code (DDC/CI Color Preset, MCCS standard)
+static DWORD KelvinToVcp14(int kelvin) {
+    if (kelvin <= 4500)  return 0x03;  // 4000K
+    if (kelvin <= 5500)  return 0x04;  // 5000K
+    if (kelvin <= 6000)  return 0x05;  // 6500K  (many monitors: 05 = 6500K)
+    if (kelvin <= 7000)  return 0x05;  // 6500K  (closest to 6500)
+    if (kelvin <= 7800)  return 0x06;  // 7500K
+    if (kelvin <= 8700)  return 0x07;  // 8200K
+    if (kelvin <= 9600)  return 0x08;  // 9300K
+    if (kelvin <= 10700) return 0x09;  // 10000K
+    return 0x0A;                       // 11500K
+}
 
 static int FindMon(const wchar_t* id) {
     for (int i = 0; i < gNumMon; i++)
@@ -231,13 +246,17 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
             out->Contrast = RawToPct(cur, mn, mx);
             ok = true;
         }
-        // Try color temp unconditionally: many monitors support VCP 0x14 but
-        // don't advertise MC_CAPS_COLOR_TEMPERATURE in the high-level caps.
-        MC_COLOR_TEMPERATURE ct = MC_COLOR_TEMPERATURE_UNKNOWN;
-        if (GetMonitorColorTemperature(h, &ct) &&
-            ct != MC_COLOR_TEMPERATURE_UNKNOWN) {
-            out->ColorTemp = CtToKelvin(ct);
-            ok = true;
+        // Read color preset via VCP 0x14 (low-level) — more reliable than
+        // the high-level MC_CAPS_COLOR_TEMPERATURE / GetMonitorColorTemperature.
+        DWORD vcpType=0, vcpCur=0, vcpMax=0;
+        if (GetVCPFeatureAndVCPFeatureReply(h, 0x14, &vcpType, &vcpCur, &vcpMax) &&
+            vcpCur != 0) {
+            // Return the raw VCP code as a negative sentinel so the UI can
+            // display it meaningfully. Map back to nearest Kelvin.
+            // Standard MCCS VCP 0x14 codes:
+            static const int kVcpKelvin[] = { 0, 0, 0, 4000, 5000, 6500, 7500, 8200, 9300, 10000, 11500 };
+            out->ColorTemp = (vcpCur < 11) ? kVcpKelvin[vcpCur] : PRESET_UNSET;
+            if (out->ColorTemp > 0) ok = true;
         }
     }
 
@@ -338,24 +357,33 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
             }
         }
 
-        CrashLog("[display] physical[%lu] trying colortemp...\n", pi);
-        if (preset->ColorTemp != PRESET_UNSET &&
-            (caps & MC_CAPS_COLOR_TEMPERATURE)) {
-            MC_COLOR_TEMPERATURE ctCur = MC_COLOR_TEMPERATURE_UNKNOWN;
-            BOOL got = FALSE;
-            __try { got = GetMonitorColorTemperature(h, &ctCur); }
+        CrashLog("[display] physical[%lu] trying colortemp (VCP 0x14)...\n", pi);
+        DWORD vcp14Orig = 0;
+        if (preset->ColorTemp != PRESET_UNSET) {
+            // Use low-level VCP 0x14 (Color Preset) instead of the high-level
+            // SetMonitorColorTemperature/MC_CAPS_COLOR_TEMPERATURE — the high-level
+            // cap flag is 0 on many monitors (including Dell S3422DWG/S2725DS) even
+            // though VCP 0x14 is fully functional.
+            DWORD vcpType=0, vcpCur=0, vcpMax=0;
+            BOOL  got = FALSE;
+            __try { got = GetVCPFeatureAndVCPFeatureReply(h, 0x14, &vcpType, &vcpCur, &vcpMax); }
             __except(EXCEPTION_EXECUTE_HANDLER) {
-                DbgPrint(L"[display] SEH 0x%08x in GetMonitorColorTemperature", GetExceptionCode());
+                CrashLog("[display] SEH 0x%08x in GetVCPFeature(0x14)\n", GetExceptionCode());
             }
             if (got) {
-                if (firstTouch) ctOrig = (DWORD)ctCur;
-                MC_COLOR_TEMPERATURE ctNew = KelvinToCt(preset->ColorTemp);
-                if (ctNew != MC_COLOR_TEMPERATURE_UNKNOWN && ctNew != ctCur) {
-                    __try { SetMonitorColorTemperature(h, ctNew); anySet = true; }
+                if (firstTouch) vcp14Orig = vcpCur;
+                DWORD want14 = KelvinToVcp14(preset->ColorTemp);
+                CrashLog("[display] VCP14 cur=%lu want=%lu (K=%d)\n", vcpCur, want14, preset->ColorTemp);
+                if (want14 != vcpCur) {
+                    BOOL setOk = FALSE;
+                    __try { setOk = SetVCPFeature(h, 0x14, want14); anySet = true; }
                     __except(EXCEPTION_EXECUTE_HANDLER) {
-                        DbgPrint(L"[display] SEH 0x%08x in SetMonitorColorTemperature", GetExceptionCode());
+                        CrashLog("[display] SEH 0x%08x in SetVCPFeature(0x14)\n", GetExceptionCode());
                     }
+                    CrashLog("[display] SetVCPFeature(0x14, %lu) -> %d\n", want14, setOk);
                 }
+            } else {
+                CrashLog("[display] GetVCPFeature(0x14) failed err=0x%lx\n", GetLastError());
             }
         }
 
@@ -366,6 +394,7 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
                 if (bMax > bMin) { gMon[si].bMin=bMin; gMon[si].bOrig=bOrig; gMon[si].bMax=bMax; }
                 if (cMax > cMin) { gMon[si].cMin=cMin; gMon[si].cOrig=cOrig; gMon[si].cMax=cMax; }
                 if (ctOrig)        gMon[si].origColorTemp = ctOrig;
+                if (vcp14Orig)     gMon[si].origVcp14     = vcp14Orig;
                 gMon[si].hasSnapshot = true;
             }
             LeaveCriticalSection(&gMonLock);
@@ -432,6 +461,8 @@ void DisplayRestoreAll(void) {
                 gMon[si].origColorTemp != (DWORD)MC_COLOR_TEMPERATURE_UNKNOWN)
                 SetMonitorColorTemperature(
                     h, (MC_COLOR_TEMPERATURE)gMon[si].origColorTemp);
+            if (gMon[si].origVcp14 != 0)
+                SetVCPFeature(h, 0x14, gMon[si].origVcp14);
 
             DbgPrint(L"[display] restored '%s'", gMon[si].deviceId);
             gMon[si].hasSnapshot = false; // don't restore again

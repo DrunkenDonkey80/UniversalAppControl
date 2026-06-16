@@ -295,14 +295,18 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
 
         if (preset->Brightness != PRESET_UNSET && (caps & MC_CAPS_BRIGHTNESS)) {
             DWORD mn=0, cur=0, mx=0;
-            if (GetMonitorBrightness(h, &mn, &cur, &mx)) {
+            BOOL got = FALSE;
+            __try { got = GetMonitorBrightness(h, &mn, &cur, &mx); }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                DbgPrint(L"[display] SEH 0x%08x in GetMonitorBrightness", GetExceptionCode());
+            }
+            if (got) {
                 if (firstTouch) { bMin=mn; bOrig=cur; bMax=mx; }
                 DWORD want = PctToRaw(preset->Brightness, mn, mx);
                 if (want != cur) {
                     __try { SetMonitorBrightness(h, want); anySet = true; }
                     __except(EXCEPTION_EXECUTE_HANDLER) {
-                        DbgPrint(L"[display] SEH 0x%08x in SetMonitorBrightness",
-                                 GetExceptionCode());
+                        DbgPrint(L"[display] SEH 0x%08x in SetMonitorBrightness", GetExceptionCode());
                     }
                 }
             }
@@ -310,14 +314,18 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
 
         if (preset->Contrast != PRESET_UNSET && (caps & MC_CAPS_CONTRAST)) {
             DWORD mn=0, cur=0, mx=0;
-            if (GetMonitorContrast(h, &mn, &cur, &mx)) {
+            BOOL got = FALSE;
+            __try { got = GetMonitorContrast(h, &mn, &cur, &mx); }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                DbgPrint(L"[display] SEH 0x%08x in GetMonitorContrast", GetExceptionCode());
+            }
+            if (got) {
                 if (firstTouch) { cMin=mn; cOrig=cur; cMax=mx; }
                 DWORD want = PctToRaw(preset->Contrast, mn, mx);
                 if (want != cur) {
                     __try { SetMonitorContrast(h, want); anySet = true; }
                     __except(EXCEPTION_EXECUTE_HANDLER) {
-                        DbgPrint(L"[display] SEH 0x%08x in SetMonitorContrast",
-                                 GetExceptionCode());
+                        DbgPrint(L"[display] SEH 0x%08x in SetMonitorContrast", GetExceptionCode());
                     }
                 }
             }
@@ -326,14 +334,18 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
         if (preset->ColorTemp != PRESET_UNSET &&
             (caps & MC_CAPS_COLOR_TEMPERATURE)) {
             MC_COLOR_TEMPERATURE ctCur = MC_COLOR_TEMPERATURE_UNKNOWN;
-            if (GetMonitorColorTemperature(h, &ctCur)) {
+            BOOL got = FALSE;
+            __try { got = GetMonitorColorTemperature(h, &ctCur); }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                DbgPrint(L"[display] SEH 0x%08x in GetMonitorColorTemperature", GetExceptionCode());
+            }
+            if (got) {
                 if (firstTouch) ctOrig = (DWORD)ctCur;
                 MC_COLOR_TEMPERATURE ctNew = KelvinToCt(preset->ColorTemp);
                 if (ctNew != MC_COLOR_TEMPERATURE_UNKNOWN && ctNew != ctCur) {
                     __try { SetMonitorColorTemperature(h, ctNew); anySet = true; }
                     __except(EXCEPTION_EXECUTE_HANDLER) {
-                        DbgPrint(L"[display] SEH 0x%08x in SetMonitorColorTemperature",
-                                 GetExceptionCode());
+                        DbgPrint(L"[display] SEH 0x%08x in SetMonitorColorTemperature", GetExceptionCode());
                     }
                 }
             }

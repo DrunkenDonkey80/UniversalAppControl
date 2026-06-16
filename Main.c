@@ -870,6 +870,8 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	for (int ai = 1; ai < __argc; ai++) {
 		if (lstrcmpiW(__wargv[ai], L"--selftest") == 0)
 			return RunSelfTests();
+		if (lstrcmpiW(__wargv[ai], L"--monitor-debug") == 0)
+			return RunMonitorDebug();
 	}
 
 	bool autostart = false;

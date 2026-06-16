@@ -172,6 +172,18 @@ static void RefreshList(HWND wnd) {
     RefreshPresetCombo(wnd, gSelected);
 }
 
+// Enable/disable all profile-specific form controls.
+static void EnableProfileControls(HWND wnd, BOOL enable) {
+    int ids[] = { IDC_NAME, IDC_HOTKEY, IDC_HIDE, IDC_MIN, IDC_PAUSE,
+                  IDC_REMOVE, IDC_STATUS };
+    for (int i = 0; i < (int)(sizeof(ids)/sizeof(ids[0])); i++)
+        EnableWindow(GetDlgItem(wnd, ids[i]), enable);
+    // Preset combo/button also depends on DisplayControl being on
+    BOOL presetEnable = enable && gDisplayControlEnabled;
+    EnableWindow(GetDlgItem(wnd, IDC_PRESET),     presetEnable);
+    EnableWindow(GetDlgItem(wnd, IDC_PRESETEDIT), gDisplayControlEnabled);
+}
+
 static void LoadSelectionToFields(HWND wnd, int idx) {
     gSelected = idx;
     if (idx < 0 || idx >= gNumProfiles) {
@@ -184,9 +196,11 @@ static void LoadSelectionToFields(HWND wnd, int idx) {
         CheckDlgButton(wnd, IDC_PAUSE, BST_UNCHECKED);
         CheckDlgButton(wnd, IDC_DISPLAYCTL,
                        gDisplayControlEnabled ? BST_CHECKED : BST_UNCHECKED);
+        EnableProfileControls(wnd, FALSE);
         RefreshPresetCombo(wnd, -1);
         return;
     }
+    EnableProfileControls(wnd, TRUE);
     PROFILE_CONFIG* p = &gProfiles[idx];
     SetDlgItemTextW(wnd, IDC_NAME, p->ProgramExeName);
     SetDlgItemTextW(wnd, IDC_PATH, p->ProgramPath);
@@ -502,54 +516,59 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 }
             }
 
-            // Layout: list on left, edit fields on right
-            int lx = 12, ly = 12, lw = 160, lh = 220;
-            int ex = lx + lw + 12;  // edit area left
-            int ew = 240;           // edit area width
+            // Layout constants
+            // Left panel: preset list + add/delete buttons
+            // Right panel: name + three attribute rows (checkbox + value side-by-side)
+            int lx = 12, ly = 12, lw = 150, lh = 224;
+            int ex = lx + lw + 14;   // right panel left
+            int ew = 244;            // right panel width
+            int LBL = 26;            // label/checkbox width portion
+            int VAL = 64;            // value edit width
             int ey = ly;
+            int RH = 28;             // row height
 
-            // Preset list (ListBox)
+            // Preset list
             MakeChild(wnd, L"LISTBOX", L"",
                 LBS_NOTIFY | WS_BORDER | WS_VSCROLL, lx, ly, lw, lh, IDC_LIST);
-            MakeBtn(wnd, L"+ Add",  lx,         ly+lh+6, 74, 26, IDC_ADD);
-            MakeBtn(wnd, L"Delete", lx+74+4,    ly+lh+6, 74, 26, IDC_REMOVE);
+            MakeBtn(wnd, L"+ Add",  lx,            ly+lh+6,       (lw-4)/2, 26, IDC_ADD);
+            MakeBtn(wnd, L"Delete", lx+(lw-4)/2+4, ly+lh+6,       (lw-4)/2, 26, IDC_REMOVE);
 
-            // Edit fields
+            // Name row
             MakeChild(wnd, L"STATIC", L"Name:", SS_RIGHT|SS_CENTERIMAGE,
-                ex, ey+3, 80, 20, 0);
+                ex, ey+2, 44, 22, 0);
             MakeChild(wnd, L"EDIT", L"", WS_BORDER|ES_AUTOHSCROLL,
-                ex+84, ey, ew-84, 26, IDC_PE_NAME);
-            ey += 32;
+                ex+48, ey, ew-48, 26, IDC_PE_NAME);
+            ey += RH + 4;
 
+            // Brightness row: [checkbox label................] [edit]
             MakeChild(wnd, L"BUTTON", L"Brightness (0-100%)",
-                BS_AUTOCHECKBOX, ex, ey, ew, 22, IDC_PE_BRIGHT_CHK);
-            ey += 24;
+                BS_AUTOCHECKBOX, ex, ey+2, ew-VAL-8, 22, IDC_PE_BRIGHT_CHK);
             MakeChild(wnd, L"EDIT", L"", WS_BORDER|ES_NUMBER|ES_AUTOHSCROLL,
-                ex+20, ey, 60, 24, IDC_PE_BRIGHT);
-            ey += 30;
+                ex+ew-VAL, ey, VAL, 26, IDC_PE_BRIGHT);
+            ey += RH + 4;
 
+            // Contrast row
             MakeChild(wnd, L"BUTTON", L"Contrast (0-100%)",
-                BS_AUTOCHECKBOX, ex, ey, ew, 22, IDC_PE_CONT_CHK);
-            ey += 24;
+                BS_AUTOCHECKBOX, ex, ey+2, ew-VAL-8, 22, IDC_PE_CONT_CHK);
             MakeChild(wnd, L"EDIT", L"", WS_BORDER|ES_NUMBER|ES_AUTOHSCROLL,
-                ex+20, ey, 60, 24, IDC_PE_CONT);
-            ey += 30;
+                ex+ew-VAL, ey, VAL, 26, IDC_PE_CONT);
+            ey += RH + 4;
 
-            MakeChild(wnd, L"BUTTON", L"Color temperature",
-                BS_AUTOCHECKBOX, ex, ey, ew, 22, IDC_PE_CTEMP_CHK);
-            ey += 24;
+            // Color temperature row: checkbox + dropdown on same line
+            MakeChild(wnd, L"BUTTON", L"Color temp:",
+                BS_AUTOCHECKBOX, ex, ey+2, 88, 22, IDC_PE_CTEMP_CHK);
             HWND ctCombo = MakeChild(wnd, L"COMBOBOX", L"",
-                CBS_DROPDOWNLIST|WS_VSCROLL, ex+20, ey, ew-20, 200, IDC_PE_CTEMP);
+                CBS_DROPDOWNLIST|WS_VSCROLL, ex+92, ey, ew-92, 200, IDC_PE_CTEMP);
             for (int i = 0; i < CT_ENTRIES_COUNT; i++)
                 ComboBox_AddString(ctCombo, kCtEntries[i].label);
             ComboBox_SetCurSel(ctCombo, 0);
-            ey += 30;
+            ey += RH + 8;
 
             MakeBtn(wnd, L"Capture from monitor", ex, ey, ew, 26, IDC_PE_CAPTURE);
             ey += 36;
 
-            MakeBtn(wnd, L"Save & Close", ex, ey, 120, 28, IDC_PE_OK);
-            MakeBtn(wnd, L"Cancel",       ex+124, ey, 80, 28, IDC_PE_CANCEL);
+            MakeBtn(wnd, L"Close",  ex,        ey, (ew-6)/2, 28, IDC_PE_OK);
+            MakeBtn(wnd, L"Cancel", ex+(ew-6)/2+6, ey, (ew-6)/2, 28, IDC_PE_CANCEL);
 
             EnumChildWindows(wnd, ApplyFontEnum, (LPARAM)gUiFont);
             PeRefreshList(wnd);
@@ -603,10 +622,17 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 }
             }
             if (id == IDC_PE_CAPTURE && code == BN_CLICKED) {
-                // Capture current monitor values into the selected preset
+                // Capture current monitor values into the selected preset.
+                // DDC/CI takes ~150-300ms; disable form + show wait cursor.
                 if (gPeSelected >= 0 && gPeSelected < gNumPresets) {
+                    EnableWindow(wnd, FALSE);
+                    HCURSOR hOld = SetCursor(LoadCursorW(NULL, IDC_WAIT));
                     DISPLAY_PRESET captured;
-                    if (DisplayCaptureCurrent(NULL, &captured)) {
+                    bool captureOk = DisplayCaptureCurrent(NULL, &captured);
+                    SetCursor(hOld);
+                    EnableWindow(wnd, TRUE);
+                    SetForegroundWindow(wnd);
+                    if (captureOk) {
                         // Only overwrite fields that were successfully captured
                         DISPLAY_PRESET* p = &gPresets[gPeSelected];
                         if (captured.Brightness != PRESET_UNSET) {
@@ -691,6 +717,7 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             CreateControls(wnd);
             EnumChildWindows(wnd, ApplyFontEnum, (LPARAM)gUiFont);
             RefreshList(wnd);
+            EnableProfileControls(wnd, FALSE);  // nothing selected yet
             return 0;
 
         case WM_ERASEBKGND: {
@@ -779,11 +806,9 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                             (IsDlgButtonChecked(wnd, IDC_DISPLAYCTL) == BST_CHECKED)
                             ? TRUE : FALSE;
                         SaveConfig();
-                        // Enable/disable preset combo
-                        EnableWindow(GetDlgItem(wnd, IDC_PRESET),
-                                     gDisplayControlEnabled);
-                        EnableWindow(GetDlgItem(wnd, IDC_PRESETEDIT),
-                                     gDisplayControlEnabled);
+                        // Re-evaluate enabled state for preset controls
+                        if (gSelected >= 0)
+                            EnableProfileControls(wnd, TRUE);
                     }
                     break;
                 case IDC_PRESET:

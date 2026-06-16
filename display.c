@@ -231,9 +231,10 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
             out->Contrast = RawToPct(cur, mn, mx);
             ok = true;
         }
+        // Try color temp unconditionally: many monitors support VCP 0x14 but
+        // don't advertise MC_CAPS_COLOR_TEMPERATURE in the high-level caps.
         MC_COLOR_TEMPERATURE ct = MC_COLOR_TEMPERATURE_UNKNOWN;
-        if ((caps & MC_CAPS_COLOR_TEMPERATURE) &&
-            GetMonitorColorTemperature(h, &ct) &&
+        if (GetMonitorColorTemperature(h, &ct) &&
             ct != MC_COLOR_TEMPERATURE_UNKNOWN) {
             out->ColorTemp = CtToKelvin(ct);
             ok = true;

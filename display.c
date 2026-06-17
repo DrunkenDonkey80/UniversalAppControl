@@ -39,8 +39,8 @@ BYTE gPrimaryVcp14Vals[MAX_VCP14_VALS] = {0};
 int  gPrimaryVcp14Count = 0;  // 0 = not probed, -1 = not supported
 
 // Exported: supported VCP 0xF0 codes (named preset modes, e.g. ComfortView/FPS/Game1).
-BYTE gPrimaryVcpF0Vals[MAX_VCP14_VALS] = {0};
-int  gPrimaryVcpF0Count = 0;
+BYTE gPrimaryVcpE2Vals[MAX_VCP14_VALS] = {0};
+int  gPrimaryVcpE2Count = 0;
 
 // Probed preset table — one entry per VCP 0xF0 code.
 MonPresetInfo    gMonPresets[MAX_VCP14_VALS] = {0};
@@ -167,24 +167,27 @@ const wchar_t* GetVcp14Label(BYTE code) {
     }
 }
 
-// VCP 0xF0 preset mode labels for Dell S3422DWG (verified from ddcutil community docs).
-// 0x0C=ComfortView confirmed; game codes match Dell AW3425DW/S-series pattern.
-const wchar_t* GetVcpF0Label(BYTE code) {
+// VCP 0xE2 picture-mode labels for Dell S3422DWG.
+// 0x0E=Warm confirmed by VCP sweep; other codes from Dell S-series community docs.
+const wchar_t* GetVcpE2Label(BYTE code) {
     switch (code) {
-        case 0x0C: return L"ComfortView";
-        case 0x0D: return L"Standard";
-        case 0x0E: return L"Movie";
-        case 0x0F: return L"FPS Game";
-        case 0x10: return L"RTS Game";
-        case 0x11: return L"RPG Game";
-        case 0x13: return L"Sports";
-        case 0x31: return L"Game 1";
-        case 0x32: return L"Game 2";
-        case 0x34: return L"Game 3";
-        case 0x36: return L"Color Space";
+        case 0x00: return L"Standard";
+        case 0x04: return L"FPS";
+        case 0x0E: return L"Warm";
+        case 0x12: return L"Cool";
+        case 0x14: return L"Custom Color";
+        case 0x1D: return L"FPS Game";
+        case 0x1E: return L"RTS Game";
+        case 0x1F: return L"RPG Game";
+        case 0x20: return L"Movie";
+        case 0x21: return L"Sports";
+        case 0x22: return L"Game";
+        case 0x27: return L"Night";
+        case 0x2F: return L"ComfortView";
+        case 0x3A: return L"sRGB";
         default: {
             static wchar_t buf[16];
-            swprintf_s(buf, 16, L"Preset 0x%02X", code);
+            swprintf_s(buf, 16, L"Mode 0x%02X", code);
             return buf;
         }
     }
@@ -198,6 +201,8 @@ void DisplayResetLastApplied(void) {
 }
 
 // Read the current VCP 0xF0 value — GET only, never changes anything.
+bool DisplayIsInited(void)  { return gMonInited; }
+
 void DisplayProbeVcp(BYTE vcpCode, BOOL* outOk, DWORD* outCur, DWORD* outMax) {
     *outOk = FALSE; *outCur = 0; *outMax = 0;
     PHYSICAL_MONITOR pm[MAX_PHYSICAL_PER_HMONITOR];
@@ -212,17 +217,16 @@ void DisplayProbeVcp(BYTE vcpCode, BOOL* outOk, DWORD* outCur, DWORD* outMax) {
     DestroyPhysicalMonitors(n, pm);
 }
 
-int DisplayReadCurrentVcpF0(void) {
+int DisplayReadCurrentPreset(void) {
     PHYSICAL_MONITOR pm[MAX_PHYSICAL_PER_HMONITOR];
     DWORD n = OpenPrimaryPhysicals(pm, MAX_PHYSICAL_PER_HMONITOR);
     if (n == 0) return PRESET_UNSET;
     HANDLE h = pm[0].hPhysicalMonitor;
     DWORD vcpType=0, vcpCur=0, vcpMax=0;
     BOOL ok = FALSE;
-    __try { ok = GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &vcpType, &vcpCur, &vcpMax); }
+    __try { ok = GetVCPFeatureAndVCPFeatureReply(h, 0xE2, &vcpType, &vcpCur, &vcpMax); }
     __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
     DestroyPhysicalMonitors(n, pm);
-    // vcpCur=0 is a valid VCP code on some monitors — only reject when the call itself failed
     return ok ? (int)vcpCur : PRESET_UNSET;
 }
 
@@ -239,7 +243,7 @@ bool DisplayRecordProfile(int vcpCode) {
     gMonPresets[i].brightness = PRESET_UNSET;
     gMonPresets[i].contrast   = PRESET_UNSET;
     gMonPresets[i].scanned    = false;
-    wcscpy_s(gMonPresets[i].name, 64, GetVcpF0Label((BYTE)vcpCode));
+    wcscpy_s(gMonPresets[i].name, 64, GetVcpE2Label((BYTE)vcpCode));
     CrashLog("[display] RecordProfile 0x%02X = %ls\n", (BYTE)vcpCode, gMonPresets[i].name);
     return true;
 }
@@ -304,14 +308,12 @@ void DisplayInit(void) {
                 } else {
                     gPrimaryVcp14Count = -1;
                 }
-                // Parse VCP 0xF0 (named display presets: ComfortView, FPS, Game1...)
+                // Parse VCP 0xE2 (Dell picture mode: Warm, Cool, Standard, etc.)
                 {
                     int cntF0 = 0; BYTE valsF0[MAX_VCP14_VALS];
-                    // Reuse capStr which is still in scope
                     const char* p = capStr;
-                    // Find "F0(" in the capabilities string
                     while (*p) {
-                        if (p[0]=='F' && p[1]=='0' && p[2]=='(') break;
+                        if (p[0]=='E' && p[1]=='2' && p[2]=='(') break;
                         p++;
                     }
                     if (*p) {
@@ -330,10 +332,10 @@ void DisplayInit(void) {
                         }
                     }
                     if (cntF0 > 0) {
-                        memcpy(gPrimaryVcpF0Vals, valsF0, (size_t)cntF0);
-                        gPrimaryVcpF0Count = cntF0;
+                        memcpy(gPrimaryVcpE2Vals, valsF0, (size_t)cntF0);
+                        gPrimaryVcpE2Count = cntF0;
                     } else {
-                        gPrimaryVcpF0Count = -1;
+                        gPrimaryVcpE2Count = -1;
                     }
                 }
                 LeaveCriticalSection(&gMonLock);
@@ -350,7 +352,7 @@ void DisplayInit(void) {
     DestroyPhysicalMonitors(n, pm);
     // gMonPresets[] is populated from INI by LoadMonPresets() after this returns.
     CrashLog("[display] Init done: caps=0x%08lX vcp14Count=%d vcpF0Count=%d\n",
-             gPrim.caps, gPrimaryVcp14Count, gPrimaryVcpF0Count);
+             gPrim.caps, gPrimaryVcp14Count, gPrimaryVcpE2Count);
 }
 
 void DisplayRefresh(void) {
@@ -458,8 +460,7 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
         ok = true;
     }
     // Profile mode: VCP 0xF0, store raw code (e.g. 0x0C=ComfortView, 0x0F=FPS...)
-    // vcpCur=0 is a valid preset code (Custom Color); only skip when call fails
-    if (GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &vcpType, &vcpCur, &vcpMax)) {
+    if (GetVCPFeatureAndVCPFeatureReply(h, 0xE2, &vcpType, &vcpCur, &vcpMax)) {
         out->ProfileMode = (int)vcpCur;
         ok = true;
     }
@@ -504,29 +505,27 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
     DWORD bMin=0, bOrig=0, bMax=0;
     DWORD cMin=0, cOrig=0, cMax=0;
     DWORD vcp14Orig = 0;
-    DWORD vcpF0Orig = 0;
+    DWORD vcpE2Orig = 0;
 
-    // Profile Mode (VCP 0xF0) — applied FIRST so B/C/CT override preset defaults.
-    // Code 0x00 = monitor's "Custom Color" read-state; writing 0x00 is undefined/destructive
-    // on many monitors (can trigger a factory reset or input switch). Skip it on write.
-    if (preset->ProfileMode != PRESET_UNSET && (BYTE)preset->ProfileMode != 0x00) {
+    // Profile Mode (VCP 0xE2) — Dell picture mode, applied FIRST so B/C override.
+    if (preset->ProfileMode != PRESET_UNSET) {
         BYTE want = (BYTE)preset->ProfileMode;
         bool skip = !force && ((int)want == gLastApplied.pm);
         if (skip) {
             CrashLog("[display] PM=0x%02X unchanged, skip\n", want);
         } else {
             DWORD fType=0, fCur=0, fMax=0; BOOL got=FALSE;
-            __try { got = GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &fType, &fCur, &fMax); }
+            __try { got = GetVCPFeatureAndVCPFeatureReply(h, 0xE2, &fType, &fCur, &fMax); }
             __except(EXCEPTION_EXECUTE_HANDLER) { }
             if (got) {
                 // Save original even if fCur==0 (custom color state)
-                if (firstTouch) vcpF0Orig = fCur;
+                if (firstTouch) vcpE2Orig = fCur;
                 if (force || (BYTE)fCur != want) {
                     BOOL setOk=FALSE;
-                    __try { setOk = SetVCPFeature(h, 0xF0, want); anySet = true; }
+                    __try { setOk = SetVCPFeature(h, 0xE2, want); anySet = true; }
                     __except(EXCEPTION_EXECUTE_HANDLER) { }
                     gLastApplied.pm = (int)want;
-                    CrashLog("[display] SetVCPF0 0x%02X -> %d\n", want, setOk);
+                    CrashLog("[display] SetVCPE2 0x%02X -> %d\n", want, setOk);
                     // Dell resets B/C after preset switch; small yield gives it time
                     Sleep(80);
                 } else {
@@ -616,7 +615,7 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
             if (bMax > bMin) { gPrim.bMin=bMin; gPrim.bOrig=bOrig; gPrim.bMax=bMax; }
             if (cMax > cMin) { gPrim.cMin=cMin; gPrim.cOrig=cOrig; gPrim.cMax=cMax; }
             if (vcp14Orig)    gPrim.origVcp14  = vcp14Orig;
-            gPrim.origVcpF0  = vcpF0Orig;  // store even if 0 (custom color state)
+            gPrim.origVcpF0  = vcpE2Orig;
             gPrim.hasSnapshot = true;
         }
         LeaveCriticalSection(&gMonLock);
@@ -645,8 +644,7 @@ void DisplayRestoreAll(void) {
 
     HANDLE h = pm[0].hPhysicalMonitor;
     // Restore preset mode first, then B/C/CT on top
-    // Only restore if original was a real settable preset (>0); 0 = custom/manual, not writable
-    if (snap.origVcpF0 > 0)    SetVCPFeature(h, 0xF0,  snap.origVcpF0);
+    if (snap.hasSnapshot)      SetVCPFeature(h, 0xE2,  snap.origVcpF0);
     if (snap.origVcp14)        SetVCPFeature(h, 0x14,  snap.origVcp14);
     if (snap.bMax > snap.bMin) SetMonitorBrightness(h, snap.bOrig);
     if (snap.cMax > snap.cMin) SetMonitorContrast(h,   snap.cOrig);

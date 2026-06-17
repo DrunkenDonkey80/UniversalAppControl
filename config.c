@@ -149,7 +149,7 @@ void LoadMonPresets(void) {
         if (name && name[0])
             wcscpy_s(gMonPresets[i].name, 64, name);
         else
-            wcscpy_s(gMonPresets[i].name, 64, GetVcpF0Label((BYTE)code));
+            wcscpy_s(gMonPresets[i].name, 64, GetVcpE2Label((BYTE)code));
         if (bStr && bStr[0]) gMonPresets[i].brightness = _wtoi(bStr);
         if (cStr && cStr[0]) gMonPresets[i].contrast   = _wtoi(cStr);
         gMonPresets[i].scanned = (bStr && bStr[0]);

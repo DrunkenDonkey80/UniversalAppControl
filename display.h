@@ -16,11 +16,11 @@ extern BYTE gPrimaryVcp14Vals[MAX_VCP14_VALS];
 extern int  gPrimaryVcp14Count;
 
 // Supported VCP 0xF0 codes for primary monitor (11 named preset modes).
-extern BYTE gPrimaryVcpF0Vals[MAX_VCP14_VALS];
-extern int  gPrimaryVcpF0Count;
+extern BYTE gPrimaryVcpE2Vals[MAX_VCP14_VALS];
+extern int  gPrimaryVcpE2Count;
 
 // Probed preset table (VCP 0xF0).  Populated by DisplayScanPresets().
-// Until scanned, names come from GetVcpF0Label(); B/C are PRESET_UNSET.
+// Until scanned, names come from GetVcpE2Label(); B/C are PRESET_UNSET.
 typedef struct {
     BYTE    vcpCode;
     wchar_t name[64];   // display label (best-guess or confirmed by scan)
@@ -33,11 +33,12 @@ extern MonPresetInfo gMonPresets[MAX_VCP14_VALS];
 extern int           gMonPresetCount; // number of valid entries in gMonPresets[]
 // Human-readable labels.
 const wchar_t* GetVcp14Label(BYTE code);
-const wchar_t* GetVcpF0Label(BYTE code);
+const wchar_t* GetVcpE2Label(BYTE code);
 
 // Read the current VCP 0xF0 value from the primary monitor (GET only, non-destructive).
 // Returns the raw VCP code (e.g. 0x0C for ComfortView) or PRESET_UNSET on failure.
-int DisplayReadCurrentVcpF0(void);
+int  DisplayReadCurrentPreset(void);  // VCP 0xE2 picture mode
+bool DisplayIsInited(void);  // true after DisplayInit()
 
 // Add vcpCode to gMonPresets[] if not already present.
 // Returns true if a new entry was added, false if it was already there.

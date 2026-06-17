@@ -704,7 +704,7 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                     // gate). Fall back to the dedicated exception-safe read used by
                     // 'Record current' which was confirmed working.
                     if (captured.ProfileMode == PRESET_UNSET) {
-                        int fallback = DisplayReadCurrentVcpF0();
+                        int fallback = DisplayReadCurrentPreset();
                         if (fallback != PRESET_UNSET) {
                             captured.ProfileMode = fallback;
                             captureOk = true; // at least something was read
@@ -803,7 +803,7 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             if (id == IDC_PE_SCAN && code == BN_CLICKED) {
                 // Read the current VCP 0xF0 value (GET only — never changes anything).
                 HCURSOR hOld = SetCursor(LoadCursorW(NULL, IDC_WAIT));
-                int vcpCode = DisplayReadCurrentVcpF0();
+                int vcpCode = DisplayReadCurrentPreset();
                 SetCursor(hOld);
                 if (vcpCode == PRESET_UNSET) {
                     MessageBoxW(wnd,
@@ -817,7 +817,7 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                         wchar_t msg[128];
                         swprintf_s(msg, _countof(msg),
                             L"'%s' (0x%02X) is already in the list.",
-                            GetVcpF0Label((BYTE)vcpCode), (BYTE)vcpCode);
+                            GetVcpE2Label((BYTE)vcpCode), (BYTE)vcpCode);
                         MessageBoxW(wnd, msg, APPNAME, MB_OK | MB_ICONINFORMATION);
                     } else {
                         SaveMonPresets();

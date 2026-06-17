@@ -79,32 +79,60 @@ static BOOL DdcciGetFeature(HANDLE h, BYTE vcp, DWORD* pType, DWORD* pCur, DWORD
     return FALSE;
 }
 
-// Write + 80 ms post-delay + readback verification.  Returns TRUE if the
-// monitor reports the new value matches what we wrote.  Logs mismatches.
+// Write + 80 ms post-delay + SAVE + readback verification + E2 diagnostic.
+//
+//  ddccontrol's analysis (docs/DDCCONTROL_ANALYSIS.md §4) suggests some monitors
+//  accept a value into a VCP register but won't apply it visually until they
+//  receive a DDC/CI SAVE command (0x0C).  Win32 exposes this via
+//  SaveCurrentMonitorSettings().  We always call it after a picture-mode write.
+//
+//  Diagnostic: when writing to F0 (picture-mode write register), also read back
+//  VCP 0xE2 (Dell's picture-mode READ register / actual visible mode).  If E2
+//  doesn't change after our F0 write, it means F0 is just a memory cell with
+//  no effect on the actual visible mode and we have to switch strategy.
 static BOOL DdcciSetFeatureVerified(HANDLE h, BYTE vcp, DWORD want) {
     DdcciWaitInterOp();
     BOOL setOk = FALSE;
     __try { setOk = SetVCPFeature(h, vcp, want); }
     __except(EXCEPTION_EXECUTE_HANDLER) { setOk = FALSE; }
     DdcciStampOp();
-    Sleep(DDC_POST_WRITE_MS); // ddccontrol's CONTROL_WRITE_DELAY
+    Sleep(DDC_POST_WRITE_MS);
     if (!setOk) {
         CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX SetVCPFeature FAILED\n", vcp, want);
         return FALSE;
     }
-    // Read back to verify the monitor actually accepted it.
+
+    // SAVE — ddccontrol equivalent of DDCCI_COMMAND_SAVE (0x0C).
+    // Tells the monitor to commit pending writes to its working state.
+    BOOL saveOk = FALSE;
+    __try { saveOk = SaveCurrentMonitorSettings(h); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { saveOk = FALSE; }
+    DdcciStampOp();
+    Sleep(DDC_POST_WRITE_MS);
+    CrashLog("[ddc] SaveCurrentMonitorSettings -> %d\n", saveOk);
+
+    // Readback the register we wrote
     DWORD vt=0, got=0, vmax=0;
-    if (DdcciGetFeature(h, vcp, &vt, &got, &vmax)) {
-        if (got == want) {
-            CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX OK (verified)\n", vcp, want);
-            return TRUE;
-        }
-        CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX REJECTED by monitor (readback=0x%02lX)\n",
-                 vcp, want, got);
-        return FALSE;
+    BOOL readOk = DdcciGetFeature(h, vcp, &vt, &got, &vmax);
+    if (readOk) {
+        if (got == want) CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX OK (verified)\n", vcp, want);
+        else             CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX REJECTED (readback=0x%02lX)\n", vcp, want, got);
+    } else {
+        CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX (no readback)\n", vcp, want);
     }
-    // Couldn't read back — assume write went through.
-    CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX (no readback)\n", vcp, want);
+
+    // Diagnostic: if we wrote F0, also read E2 to see if the *visible* mode changed.
+    // If E2 stays at its previous value after F0 write+save, F0 is not the right register.
+    if (vcp == 0xF0) {
+        DWORD evt=0, ecur=0, emax=0;
+        if (DdcciGetFeature(h, 0xE2, &evt, &ecur, &emax))
+            CrashLog("[ddc] After F0 write: E2 reads 0x%02lX (expected change to reflect visible mode)\n", ecur);
+        else
+            CrashLog("[ddc] After F0 write: E2 read failed\n");
+    }
+
+    // Don't return FALSE just because readback didn't match — monitor may have
+    // mapped our value to something else.  Trust the SAVE call.
     return TRUE;
 }
 

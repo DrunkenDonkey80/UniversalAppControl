@@ -620,28 +620,25 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             }
             ey += 30;
 
-            // Monitor Preset (VCP 0xF0) — checkbox + full-width combo
+            // Monitor Preset (VCP 0xF0) — checkbox on its own line, combo below full-width
             MakeChild(wnd, L"BUTTON", L"Monitor preset",
-                BS_AUTOCHECKBOX, ex, ey, 104, 22, IDC_PE_PROF_CHK);
+                BS_AUTOCHECKBOX, ex, ey, ew, 22, IDC_PE_PROF_CHK);
+            ey += 26;
             {
                 HWND prCb = MakeChild(wnd, L"COMBOBOX", L"",
-                    CBS_DROPDOWNLIST|WS_VSCROLL, ex+108, ey, ew-108, 200, IDC_PE_PROFILE);
+                    CBS_DROPDOWNLIST|WS_VSCROLL, ex, ey, ew, 200, IDC_PE_PROFILE);
                 BuildProfileCombo(prCb);
             }
             ey += 30;
 
-            // Capture full-width
-            MakeBtn(wnd, L"Capture from monitor", ex, ey, ew, 26, IDC_PE_CAPTURE);
-            ey += 34;
-
-            // Apply full-width (accent color via DrawThemedButton)
-            MakeBtn(wnd, L"Apply to monitor", ex, ey, ew, 26, IDC_PE_APPLY);
-            ey += 34;
-
-            // Close / Cancel split
-            MakeBtn(wnd, L"Close",  ex,              ey, (ew-6)/2, 28, IDC_PE_OK);
-            MakeBtn(wnd, L"Cancel", ex+(ew-6)/2+6,   ey, (ew-6)/2, 28, IDC_PE_CANCEL);
-            ey += 28;
+            // Capture / Apply / Close — three equal buttons on one row
+            {
+                int bw = (ew - 12) / 3;
+                MakeBtn(wnd, L"Capture", ex,              ey, bw,          28, IDC_PE_CAPTURE);
+                MakeBtn(wnd, L"Apply",   ex+bw+6,         ey, bw,          28, IDC_PE_APPLY);
+                MakeBtn(wnd, L"Close",   ex+2*(bw+6),     ey, ew-2*(bw+6), 28, IDC_PE_OK);
+            }
+            ey += 32;
 
             // Now create the list to match the right panel height
             int lh = ey - ly - 34;  // leave room for Add/Delete below
@@ -879,7 +876,7 @@ static void ShowPresetEditor(HWND parent) {
     }
     gPeDone = false;
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
-    RECT r = { 0, 0, 440, 370 };
+    RECT r = { 0, 0, 440, 254 };
     AdjustWindowRectEx(&r, style, FALSE, 0);
     HWND wnd = CreateWindowExW(0, L"UAC_PresetEditorWnd",
         APPNAME L" - Edit Display Presets",

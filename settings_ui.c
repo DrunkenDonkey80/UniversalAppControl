@@ -504,7 +504,7 @@ static void PeLoadFields(HWND wnd, int idx) {
         SendDlgItemMessage(wnd, IDC_PE_CONT, TBM_SETPOS, TRUE, 50);
         CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_UNCHECKED);
     }
-    // Monitor Profile combo (VCP 0xF0)
+    // Monitor Preset combo (VCP 0xF0) + checkbox
     {
         HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
         int cnt = ComboBox_GetCount(prCb); int sel = 0;
@@ -513,6 +513,8 @@ static void PeLoadFields(HWND wnd, int idx) {
             if ((int)data == p->ProfileMode) { sel = i; break; }
         }
         ComboBox_SetCurSel(prCb, sel);
+        CheckDlgButton(wnd, IDC_PE_PROF_CHK,
+            (p->ProfileMode != PRESET_UNSET) ? BST_CHECKED : BST_UNCHECKED);
     }
     PeUpdateLabels(wnd);
 }
@@ -532,8 +534,8 @@ static void PeSaveFields(HWND wnd) {
         p->Contrast = PRESET_UNSET;
     }
     p->ColorTemp = PRESET_UNSET;  // VCP 0x14 removed from UI; profile covers CT
-    // Profile mode from combo (VCP 0xF0)
-    {
+    // Monitor Preset (VCP 0xF0) — only save if checkbox is checked
+    if (IsDlgButtonChecked(wnd, IDC_PE_PROF_CHK) == BST_CHECKED) {
         HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
         int sel = ComboBox_GetCurSel(prCb);
         if (sel > 0) {
@@ -542,6 +544,8 @@ static void PeSaveFields(HWND wnd) {
         } else {
             p->ProfileMode = PRESET_UNSET;
         }
+    } else {
+        p->ProfileMode = PRESET_UNSET;
     }
 }
 
@@ -616,23 +620,15 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             }
             ey += 30;
 
-            // Monitor Profile (VCP 0xF0) — selects the named preset on the monitor.
-            // Changing this resets the monitor's B/C to that profile's defaults;
-            // the overrides below are then applied on top.
-            MakeChild(wnd, L"STATIC", L"Monitor profile:",
-                SS_LEFT, ex, ey+5, 90, 18, 0);
+            // Monitor Preset (VCP 0xF0) — checkbox + full-width combo
+            MakeChild(wnd, L"BUTTON", L"Monitor preset",
+                BS_AUTOCHECKBOX, ex, ey, 104, 22, IDC_PE_PROF_CHK);
             {
                 HWND prCb = MakeChild(wnd, L"COMBOBOX", L"",
-                    CBS_DROPDOWNLIST|WS_VSCROLL, ex+94, ey, ew-94-110, 200, IDC_PE_PROFILE);
+                    CBS_DROPDOWNLIST|WS_VSCROLL, ex+108, ey, ew-108, 200, IDC_PE_PROFILE);
                 BuildProfileCombo(prCb);
             }
-            MakeBtn(wnd, L"Record current", ex+ew-106, ey, 106, 26, IDC_PE_SCAN);
-            ey += 32;
-
-            // Separator: override controls below apply AFTER the profile
-            MakeChild(wnd, L"STATIC", L"Override (optional):",
-                SS_LEFT, ex, ey, ew, 16, 0);
-            ey += 18;
+            ey += 30;
 
             // Capture full-width
             MakeBtn(wnd, L"Capture from monitor", ex, ey, ew, 26, IDC_PE_CAPTURE);
@@ -677,7 +673,7 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 PeSaveFields(wnd);
                 PeRefreshList(wnd);
             }
-            if ((id == IDC_PE_BRIGHT_CHK || id == IDC_PE_CONT_CHK) && code == BN_CLICKED) {
+            if ((id == IDC_PE_BRIGHT_CHK || id == IDC_PE_CONT_CHK || id == IDC_PE_PROF_CHK) && code == BN_CLICKED) {
                 PeSaveFields(wnd);
             }
             if (id == IDC_PE_PROFILE && code == CBN_SELCHANGE) {
@@ -727,6 +723,7 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                         }
                         if (captured.ProfileMode != PRESET_UNSET) {
                             p->ProfileMode = captured.ProfileMode;
+                            CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_CHECKED);
                         }
                         PeLoadFields(wnd, gPeSelected);
                         SaveConfig();

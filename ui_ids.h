@@ -48,4 +48,5 @@
 #define IDC_PE_APPLY       3220  // "Apply to monitor" test button
 #define IDC_PE_PROFILE_LBL 3221  // (unused - replaced by combo)
 #define IDC_PE_PROFILE     3222  // combobox: monitor preset mode (VCP 0xF0)
-#define IDC_PE_SCAN        3223  // "Scan" button: probe all F0 codes
+#define IDC_PE_SCAN        3223  // "Scan" button: probe all F0 codes (unused)
+#define IDC_PE_PROF_CHK    3224  // "Monitor preset" checkbox

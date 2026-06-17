@@ -171,7 +171,6 @@ const wchar_t* GetVcp14Label(BYTE code) {
 // 0x0C=ComfortView confirmed; game codes match Dell AW3425DW/S-series pattern.
 const wchar_t* GetVcpF0Label(BYTE code) {
     switch (code) {
-        case 0x00: return L"Custom Color";
         case 0x0C: return L"ComfortView";
         case 0x0D: return L"Standard";
         case 0x0E: return L"Movie";
@@ -223,14 +222,14 @@ int DisplayReadCurrentVcpF0(void) {
     __try { ok = GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &vcpType, &vcpCur, &vcpMax); }
     __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
     DestroyPhysicalMonitors(n, pm);
-    // vcpCur=0 is valid (e.g. "Custom Color" preset) — only reject when call failed
+    // vcpCur=0 is a valid VCP code on some monitors — only reject when the call itself failed
     return ok ? (int)vcpCur : PRESET_UNSET;
 }
 
 // Add vcpCode to gMonPresets[] with a label from GetVcpF0Label().
 // No-ops if the code is already in the list.  Returns true if newly added.
 bool DisplayRecordProfile(int vcpCode) {
-    if (vcpCode < 0 || vcpCode > 255) return false;  // 0 is valid (Custom Color)
+    if (vcpCode < 0 || vcpCode > 255) return false;  // 0 is a valid VCP code
     for (int i = 0; i < gMonPresetCount; i++)
         if (gMonPresets[i].vcpCode == (BYTE)vcpCode) return false; // already recorded
     if (gMonPresetCount >= MAX_VCP14_VALS) return false;

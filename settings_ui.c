@@ -410,11 +410,7 @@ static void BuildProfileCombo(HWND cb) {
     for (int i = 0; i < gMonPresetCount; i++) {
         wchar_t label[128];
         MonPresetInfo* p = &gMonPresets[i];
-        if (p->scanned && p->brightness != PRESET_UNSET && p->contrast != PRESET_UNSET)
-            swprintf_s(label, _countof(label), L"%s  (B:%d C:%d)",
-                       p->name, p->brightness, p->contrast);
-        else
-            swprintf_s(label, _countof(label), L"%s", p->name);
+        swprintf_s(label, _countof(label), L"%s", p->name);
         idx = ComboBox_AddString(cb, label);
         SendMessage(cb, CB_SETITEMDATA, idx, (LPARAM)(INT_PTR)(int)p->vcpCode);
         if ((LRESULT)(INT_PTR)(int)p->vcpCode == prevCode) newSel = idx;

@@ -41,6 +41,8 @@ int  gPrimaryVcp14Count = 0;  // 0 = not probed, -1 = not supported
 // Exported: supported VCP 0xF0 codes (named preset modes, e.g. ComfortView/FPS/Game1).
 BYTE gPrimaryVcpE2Vals[MAX_VCP14_VALS] = {0};
 int  gPrimaryVcpE2Count = 0;
+BYTE gPrimaryVcpF0Vals[MAX_VCP14_VALS] = {0}; // VCP F0 picture-mode codes (writable on Dell)
+int  gPrimaryVcpF0Count = 0;
 
 // Probed preset table — one entry per VCP 0xF0 code.
 MonPresetInfo    gMonPresets[MAX_VCP14_VALS] = {0};
@@ -314,36 +316,24 @@ void DisplayInit(void) {
                 } else {
                     gPrimaryVcp14Count = -1;
                 }
-                // Parse VCP 0xE2 (Dell picture mode: Warm, Cool, Standard, etc.)
-                {
-                    int cntF0 = 0; BYTE valsF0[MAX_VCP14_VALS];
-                    const char* p = capStr;
-                    while (*p) {
-                        if (p[0]=='E' && p[1]=='2' && p[2]=='(') break;
-                        p++;
-                    }
-                    if (*p) {
-                        p += 3;
-                        while (*p && *p != ')' && cntF0 < MAX_VCP14_VALS) {
-                            while (*p == ' ') p++;
-                            if (*p == ')') break;
-                            unsigned v=0; int d=0;
-                            while ((*p>='0'&&*p<='9')||(*p>='a'&&*p<='f')||(*p>='A'&&*p<='F')) {
-                                v=v*16+((*p>='0'&&*p<='9')?*p-'0':
-                                        (*p>='a'&&*p<='f')?*p-'a'+10:*p-'A'+10);
-                                p++; d++;
-                            }
-                            if (d > 0) valsF0[cntF0++] = (BYTE)v;
-                            while (*p == ' ') p++;
-                        }
-                    }
-                    if (cntF0 > 0) {
-                        memcpy(gPrimaryVcpE2Vals, valsF0, (size_t)cntF0);
-                        gPrimaryVcpE2Count = cntF0;
-                    } else {
-                        gPrimaryVcpE2Count = -1;
-                    }
-                }
+                // Helper lambda-style macro to parse one VCP block e.g. "E2(0C 0D 0E)"
+                #define PARSE_VCP_BLOCK(TAG1, TAG2, OUTVALS, OUTCOUNT) do { \
+                    int _cnt=0; BYTE _v[MAX_VCP14_VALS]; const char*_p=capStr; \
+                    while(*_p){if(_p[0]==(TAG1)&&_p[1]==(TAG2)&&_p[2]=='('){break;}_p++;} \
+                    if(*_p){_p+=3; while(*_p&&*_p!=')'&&_cnt<MAX_VCP14_VALS){ \
+                        while(*_p==' ')_p++; if(*_p==')')break; \
+                        unsigned _val=0;int _d=0; \
+                        while((*_p>='0'&&*_p<='9')||(*_p>='a'&&*_p<='f')||(*_p>='A'&&*_p<='F')){ \
+                            _val=_val*16+((*_p>='0'&&*_p<='9')?*_p-'0':(*_p>='a'&&*_p<='f')?*_p-'a'+10:*_p-'A'+10); \
+                            _p++;_d++; } if(_d>0)_v[_cnt++]=(BYTE)_val; while(*_p==' ')_p++; \
+                    }} \
+                    if(_cnt>0){memcpy((OUTVALS),_v,(size_t)_cnt);(OUTCOUNT)=_cnt;}else{(OUTCOUNT)=-1;} \
+                } while(0)
+
+                // VCP 0xE2 — Dell picture-mode READ register (cur=active mode, but WRITES do nothing)
+                PARSE_VCP_BLOCK('E','2', gPrimaryVcpE2Vals, gPrimaryVcpE2Count);
+                // VCP 0xF0 — Dell picture-mode WRITE register (confirmed writable via old scan)
+                PARSE_VCP_BLOCK('F','0', gPrimaryVcpF0Vals, gPrimaryVcpF0Count);
                 LeaveCriticalSection(&gMonLock);
             }
             free(capStr);
@@ -365,13 +355,22 @@ void DisplayInit(void) {
 // entries loaded first are not re-added.  This means the combo is always pre-filled
 // with every mode the monitor advertises — no Capture button needed.
 void DisplayPopulatePresetsFromCaps(void) {
-    if (gPrimaryVcpE2Count <= 0) return;
-    for (int i = 0; i < gPrimaryVcpE2Count; i++) {
-        BYTE code = gPrimaryVcpE2Vals[i];
-        DisplayRecordProfile(0xE2, (int)code);
+    // Prefer VCP 0xF0 — confirmed writable on Dell monitors (old scan).
+    // E2 reads the current mode but writes are silently ignored on this hardware.
+    if (gPrimaryVcpF0Count > 0) {
+        for (int i = 0; i < gPrimaryVcpF0Count; i++)
+            DisplayRecordProfile(0xF0, (int)gPrimaryVcpF0Vals[i]);
+        CrashLog("[display] PopulatePresetsFromCaps: %d F0 entries -> gMonPresetCount=%d\n",
+                 gPrimaryVcpF0Count, gMonPresetCount);
+    } else if (gPrimaryVcpE2Count > 0) {
+        // Fallback: monitor has E2 but not F0 — may be writable on non-Dell hardware
+        for (int i = 0; i < gPrimaryVcpE2Count; i++)
+            DisplayRecordProfile(0xE2, (int)gPrimaryVcpE2Vals[i]);
+        CrashLog("[display] PopulatePresetsFromCaps: %d E2 entries (F0 absent) -> gMonPresetCount=%d\n",
+                 gPrimaryVcpE2Count, gMonPresetCount);
+    } else {
+        CrashLog("[display] PopulatePresetsFromCaps: no F0 or E2 caps found\n");
     }
-    CrashLog("[display] PopulatePresetsFromCaps: %d E2 entries -> gMonPresetCount=%d\n",
-             gPrimaryVcpE2Count, gMonPresetCount);
 }
 
 void DisplayRefresh(void) {

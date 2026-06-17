@@ -84,6 +84,7 @@ typedef struct _PROFILE_CONFIG
 	int NumHiddenWindows;
 
 	HWND ForegroundWindow;
+	BOOL IsPaused;     // TRUE after we successfully suspended the process; reset when PID changes
 
 	wchar_t DisplayPreset[MAX_NAME]; // name of the DISPLAY_PRESET to apply, or L"" for none
 } PROFILE_CONFIG;

@@ -505,6 +505,10 @@ void UpdateProcessIDs() {
 			//DbgPrint(L"Found process %s, comparing to %s: %d", ProcessEntry.szExeFile, gProfiles[i].ProgramExeName, found);
 			if (found) {
 				DbgPrint(L"Found process %s, comparing to %s: %d", ProcessEntry.szExeFile, gProfiles[i].ProgramExeName, found);
+				if (gProfiles[i].ProcessID != ProcessEntry.th32ProcessID) {
+					// PID changed = process restarted; reset pause state
+					gProfiles[i].IsPaused = FALSE;
+				}
 				gProfiles[i].ProcessID = ProcessEntry.th32ProcessID;
 			}
 		}
@@ -673,20 +677,23 @@ void HandleProfile(int profileId, bool trigger) {
 	u32 pid = gProfiles[profileId].ProcessID;
 
 	if (op == PROF_OP_PAUSE && pid != 0) {
-		// For pause mode: check ACTUAL process state, not a toggle flag.
-		// Suspended → resume then show.  Running → hide then suspend.
-		bool suspended = IsProcessSuspended(pid);
-		if (suspended) {
-			// Resume first, then restore windows
+		// Use a per-profile flag — do NOT probe with IsProcessSuspended():
+		// anti-cheat / elevated games block OpenThread, so the probe always
+		// returns "suspended" even when the game is running, which causes the
+		// code to take the resume path on every press.
+		BOOL wasPaused = gProfiles[profileId].IsPaused;
+		CrashLog("[hotkey] Pause profile %d: wasPaused=%d pid=%u\n", profileId, wasPaused, pid);
+		if (wasPaused) {
 			ResumeProcess(pid);
 			Sleep(10);
 			RestoreWindowsForPofile(profileId);
+			gProfiles[profileId].IsPaused = FALSE;
 		} else {
-			// Hide windows first, then suspend
 			gProfiles[profileId].ForegroundWindow = 0;
-			bool changed = HideWindowsForPofile(profileId);
-			if (changed) Sleep(10);
+			HideWindowsForPofile(profileId);
+			Sleep(10);
 			SuspendProcess(pid);
+			gProfiles[profileId].IsPaused = TRUE;
 		}
 		return;
 	}

@@ -18,6 +18,8 @@ extern int  gPrimaryVcp14Count;
 // Supported VCP 0xF0 codes for primary monitor (11 named preset modes).
 extern BYTE gPrimaryVcpE2Vals[MAX_VCP14_VALS];
 extern int  gPrimaryVcpE2Count;
+extern BYTE gPrimaryVcpF0Vals[MAX_VCP14_VALS]; // F0 = writable picture-mode selector
+extern int  gPrimaryVcpF0Count;
 
 // Probed preset table (VCP 0xF0).  Populated by DisplayScanPresets().
 // Until scanned, names come from GetVcpE2Label(); B/C are PRESET_UNSET.

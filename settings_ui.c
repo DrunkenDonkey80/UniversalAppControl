@@ -484,8 +484,7 @@ static void PeLoadFields(HWND wnd, int idx) {
         SendDlgItemMessage(wnd, IDC_PE_CONT,   TBM_SETPOS, TRUE, 50);
         CheckDlgButton(wnd, IDC_PE_BRIGHT_CHK, BST_UNCHECKED);
         CheckDlgButton(wnd, IDC_PE_CONT_CHK,   BST_UNCHECKED);
-        CheckDlgButton(wnd, IDC_PE_CTEMP_CHK,  BST_UNCHECKED);
-        ComboBox_SetCurSel(GetDlgItem(wnd, IDC_PE_CTEMP), 0);
+        ComboBox_SetCurSel(GetDlgItem(wnd, IDC_PE_PROFILE), 0);
         PeUpdateLabels(wnd);
         return;
     }
@@ -505,23 +504,7 @@ static void PeLoadFields(HWND wnd, int idx) {
         SendDlgItemMessage(wnd, IDC_PE_CONT, TBM_SETPOS, TRUE, 50);
         CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_UNCHECKED);
     }
-    // Find the combo item whose CB_GETITEMDATA matches p->ColorTemp.
-    {
-        HWND ctCb = GetDlgItem(wnd, IDC_PE_CTEMP);
-        int ctSel = 0;  // default: index 0 = "(don't change)"
-        if (p->ColorTemp != PRESET_UNSET) {
-            int cnt = ComboBox_GetCount(ctCb);
-            for (int i = 1; i < cnt; i++) {
-                LRESULT data = SendMessage(ctCb, CB_GETITEMDATA, (WPARAM)i, 0);
-                if ((int)data == p->ColorTemp) { ctSel = i; break; }
-            }
-        }
-        ComboBox_SetCurSel(ctCb, ctSel);
-        CheckDlgButton(wnd, IDC_PE_CTEMP_CHK,
-                       (p->ColorTemp != PRESET_UNSET && ctSel > 0)
-                           ? BST_CHECKED : BST_UNCHECKED);
-    }
-    // Monitor Preset combo
+    // Monitor Profile combo (VCP 0xF0)
     {
         HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
         int cnt = ComboBox_GetCount(prCb); int sel = 0;
@@ -548,19 +531,8 @@ static void PeSaveFields(HWND wnd) {
     } else {
         p->Contrast = PRESET_UNSET;
     }
-    if (IsDlgButtonChecked(wnd, IDC_PE_CTEMP_CHK) == BST_CHECKED) {
-        HWND ctCb = GetDlgItem(wnd, IDC_PE_CTEMP);
-        int sel = ComboBox_GetCurSel(ctCb);
-        if (sel > 0) {
-            LRESULT data = SendMessage(ctCb, CB_GETITEMDATA, (WPARAM)sel, 0);
-            p->ColorTemp = (data != CB_ERR) ? (int)data : PRESET_UNSET;
-        } else {
-            p->ColorTemp = PRESET_UNSET;
-        }
-    } else {
-        p->ColorTemp = PRESET_UNSET;
-    }
-    // Profile mode from combo
+    p->ColorTemp = PRESET_UNSET;  // VCP 0x14 removed from UI; profile covers CT
+    // Profile mode from combo (VCP 0xF0)
     {
         HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
         int sel = ComboBox_GetCurSel(prCb);
@@ -644,17 +616,10 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             }
             ey += 30;
 
-            // Color temperature: checkbox + combo on same row
-            MakeChild(wnd, L"BUTTON", L"Color temp:",
-                BS_AUTOCHECKBOX, ex, ey+2, 90, 22, IDC_PE_CTEMP_CHK);
-            HWND ctCombo = MakeChild(wnd, L"COMBOBOX", L"",
-                CBS_DROPDOWNLIST|WS_VSCROLL, ex+94, ey, ew-94, 200, IDC_PE_CTEMP);
-            BuildCtCombo(ctCombo);
-            ComboBox_SetCurSel(ctCombo, 0);
-            ey += 32;
-
-            // Monitor Preset (VCP 0xF0): label + combo + Scan button
-            MakeChild(wnd, L"STATIC", L"Monitor preset:",
+            // Monitor Profile (VCP 0xF0) — selects the named preset on the monitor.
+            // Changing this resets the monitor's B/C to that profile's defaults;
+            // the overrides below are then applied on top.
+            MakeChild(wnd, L"STATIC", L"Monitor profile:",
                 SS_LEFT, ex, ey+5, 90, 18, 0);
             {
                 HWND prCb = MakeChild(wnd, L"COMBOBOX", L"",
@@ -662,7 +627,12 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 BuildProfileCombo(prCb);
             }
             MakeBtn(wnd, L"Scan", ex+ew-66, ey, 66, 26, IDC_PE_SCAN);
-            ey += 30;
+            ey += 32;
+
+            // Separator: override controls below apply AFTER the profile
+            MakeChild(wnd, L"STATIC", L"Override (optional):",
+                SS_LEFT, ex, ey, ew, 16, 0);
+            ey += 18;
 
             // Capture full-width
             MakeBtn(wnd, L"Capture from monitor", ex, ey, ew, 26, IDC_PE_CAPTURE);
@@ -707,11 +677,10 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 PeSaveFields(wnd);
                 PeRefreshList(wnd);
             }
-            if ((id == IDC_PE_BRIGHT_CHK || id == IDC_PE_CONT_CHK ||
-                 id == IDC_PE_CTEMP_CHK) && code == BN_CLICKED) {
+            if ((id == IDC_PE_BRIGHT_CHK || id == IDC_PE_CONT_CHK) && code == BN_CLICKED) {
                 PeSaveFields(wnd);
             }
-            if (id == IDC_PE_CTEMP && code == CBN_SELCHANGE) {
+            if (id == IDC_PE_PROFILE && code == CBN_SELCHANGE) {
                 PeSaveFields(wnd);
             }
             if (id == IDC_LIST && code == LBN_SELCHANGE) {
@@ -756,10 +725,6 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                             p->Contrast = captured.Contrast;
                             CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_CHECKED);
                         }
-                        if (captured.ColorTemp != PRESET_UNSET) {
-                            p->ColorTemp = captured.ColorTemp;
-                            CheckDlgButton(wnd, IDC_PE_CTEMP_CHK, BST_CHECKED);
-                        }
                         if (captured.ProfileMode != PRESET_UNSET) {
                             p->ProfileMode = captured.ProfileMode;
                         }
@@ -781,10 +746,10 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                          gPeSelected, gNumPresets);
                 PeSaveFields(wnd);
                 if (gPeSelected >= 0 && gPeSelected < gNumPresets) {
-                    CrashLog("[ui] preset B=%d C=%d CT=%d\n",
+                    CrashLog("[ui] preset B=%d C=%d Profile=0x%02X\n",
                              gPresets[gPeSelected].Brightness,
                              gPresets[gPeSelected].Contrast,
-                             gPresets[gPeSelected].ColorTemp);
+                             (BYTE)gPresets[gPeSelected].ProfileMode);
                     // Always route through the worker thread so DDC/CI never
                     // runs on the UI thread (concurrent I2C access causes crash).
                     // force=1 bypasses the gDisplayControlEnabled gate.

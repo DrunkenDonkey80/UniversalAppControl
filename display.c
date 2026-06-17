@@ -564,9 +564,8 @@ static const BYTE kF0Defaults[] = {
 static const int kF0DefaultCount = (int)(sizeof(kF0Defaults) / sizeof(kF0Defaults[0]));
 
 void DisplayPopulatePresetsFromCaps(void) {
-    // Strip any stale E2 entries loaded from INI — E2 writes are silently ignored
-    // on this hardware so those entries are useless in the selectable combo.
-    // The user builds the list manually via Capture.
+    // Strip stale E2 entries from INI (E2 writes are silently ignored —
+    // these entries appeared in old INIs from buggy versions).
     int kept = 0;
     for (int i = 0; i < gMonPresetCount; i++) {
         if (gMonPresets[i].vcpReg != 0xE2)
@@ -574,11 +573,24 @@ void DisplayPopulatePresetsFromCaps(void) {
         else
             CrashLog("[display] Populate: dropping stale E2:%02X\n", gMonPresets[i].vcpCode);
     }
-    if (kept != gMonPresetCount) {
-        gMonPresetCount = kept;
-        SaveMonPresets(); // remove stale entries from INI immediately
+    gMonPresetCount = kept;
+
+    // Populate from F0 capabilities.
+    //
+    // F0 is a write-trigger register on this hardware: writes DO change the
+    // visible mode, but reads return 0x00 unless the previous mode change
+    // came through F0 itself (OSD changes don't update F0).  So Capture is
+    // useless for F0 — the only reliable source for the F0 mode list is the
+    // capabilities-string F0(...) block parsed at DisplayInit.
+    if (gPrimaryVcpF0Count > 0) {
+        for (int i = 0; i < gPrimaryVcpF0Count; i++)
+            DisplayRecordProfile(0xF0, (int)gPrimaryVcpF0Vals[i]);
+        CrashLog("[display] Populate: %d F0 entries from caps\n", gPrimaryVcpF0Count);
+    } else {
+        CrashLog("[display] Populate: no F0(...) block in caps; combo will be empty\n");
     }
-    CrashLog("[display] Populate done: %d entries\n", gMonPresetCount);
+    SaveMonPresets();
+    CrashLog("[display] Populate done: %d entries total\n", gMonPresetCount);
 }
 
 void DisplayRefresh(void) {

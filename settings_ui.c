@@ -758,35 +758,29 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                         PeUpdateLabels(wnd);
 
                         // --- Monitor preset via F0 ---
-                        // F0 is the write register. cur=0 means the monitor is in a mode
-                        // that F0 doesn't control (e.g. Warm via OSD) — tell the user.
-                        if (captured.ProfileModeVcp == 0xF0) {
-                            if (captured.ProfileMode == 0) {
-                                MessageBoxW(wnd,
-                                    L"Current monitor mode cannot be captured."
-                                    L"\n\nThe monitor is in a mode that is not accessible via"
-                                    L" DDC/CI (F0 register reads 0x00)."
-                                    L"\n\nSwitch to a different mode via the monitor OSD"
-                                    L" (e.g. Standard, Movie, FPS, RTS) and try again.",
-                                    APPNAME L" - Capture", MB_OK | MB_ICONINFORMATION);
-                            } else {
-                                int capturedCode = captured.ProfileMode;
-                                DisplayRecordProfile(0xF0, capturedCode);
-                                SaveMonPresets();
-                                p->ProfileMode    = capturedCode;
-                                p->ProfileModeVcp = 0xF0;
-                                HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
-                                BuildProfileCombo(prCb);
-                                LRESULT wantKey = (LRESULT)((0xF0 << 8) | (capturedCode & 0xFF));
-                                int cnt2 = ComboBox_GetCount(prCb);
-                                for (int _ci = 0; _ci < cnt2; _ci++) {
-                                    if (SendMessage(prCb, CB_GETITEMDATA, _ci, 0) == wantKey) {
-                                        ComboBox_SetCurSel(prCb, _ci);
-                                        break;
-                                    }
+                        // F0 is a WRITE-TRIGGER register on Dell: writes change the
+                        // visible mode but reads return 0x00 unless the last change
+                        // came through F0 itself (OSD changes don't update F0).
+                        // So Capture only fills F0 when there's actually something to
+                        // read — otherwise B/C are captured but the F0 selection is
+                        // left alone for the user to pick from the pre-populated combo.
+                        if (captured.ProfileModeVcp == 0xF0 && captured.ProfileMode != 0) {
+                            int capturedCode = captured.ProfileMode;
+                            DisplayRecordProfile(0xF0, capturedCode);
+                            SaveMonPresets();
+                            p->ProfileMode    = capturedCode;
+                            p->ProfileModeVcp = 0xF0;
+                            HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
+                            BuildProfileCombo(prCb);
+                            LRESULT wantKey = (LRESULT)((0xF0 << 8) | (capturedCode & 0xFF));
+                            int cnt2 = ComboBox_GetCount(prCb);
+                            for (int _ci = 0; _ci < cnt2; _ci++) {
+                                if (SendMessage(prCb, CB_GETITEMDATA, _ci, 0) == wantKey) {
+                                    ComboBox_SetCurSel(prCb, _ci);
+                                    break;
                                 }
-                                CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_CHECKED);
                             }
+                            CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_CHECKED);
                         }
 
                         SaveConfig();

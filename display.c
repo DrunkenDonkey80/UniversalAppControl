@@ -171,6 +171,7 @@ const wchar_t* GetVcp14Label(BYTE code) {
 // 0x0C=ComfortView confirmed; game codes match Dell AW3425DW/S-series pattern.
 const wchar_t* GetVcpF0Label(BYTE code) {
     switch (code) {
+        case 0x00: return L"Custom Color";
         case 0x0C: return L"ComfortView";
         case 0x0D: return L"Standard";
         case 0x0E: return L"Movie";
@@ -198,6 +199,20 @@ void DisplayResetLastApplied(void) {
 }
 
 // Read the current VCP 0xF0 value — GET only, never changes anything.
+void DisplayProbeVcp(BYTE vcpCode, BOOL* outOk, DWORD* outCur, DWORD* outMax) {
+    *outOk = FALSE; *outCur = 0; *outMax = 0;
+    PHYSICAL_MONITOR pm[MAX_PHYSICAL_PER_HMONITOR];
+    DWORD n = OpenPrimaryPhysicals(pm, MAX_PHYSICAL_PER_HMONITOR);
+    if (n == 0) return;
+    HANDLE h = pm[0].hPhysicalMonitor;
+    DWORD vcpType=0, cur=0, mx=0;
+    BOOL ok = FALSE;
+    __try { ok = GetVCPFeatureAndVCPFeatureReply(h, vcpCode, &vcpType, &cur, &mx); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+    *outOk = ok; *outCur = cur; *outMax = mx;
+    DestroyPhysicalMonitors(n, pm);
+}
+
 int DisplayReadCurrentVcpF0(void) {
     PHYSICAL_MONITOR pm[MAX_PHYSICAL_PER_HMONITOR];
     DWORD n = OpenPrimaryPhysicals(pm, MAX_PHYSICAL_PER_HMONITOR);
@@ -208,13 +223,14 @@ int DisplayReadCurrentVcpF0(void) {
     __try { ok = GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &vcpType, &vcpCur, &vcpMax); }
     __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
     DestroyPhysicalMonitors(n, pm);
-    return (ok && vcpCur > 0) ? (int)vcpCur : PRESET_UNSET;
+    // vcpCur=0 is valid (e.g. "Custom Color" preset) — only reject when call failed
+    return ok ? (int)vcpCur : PRESET_UNSET;
 }
 
 // Add vcpCode to gMonPresets[] with a label from GetVcpF0Label().
 // No-ops if the code is already in the list.  Returns true if newly added.
 bool DisplayRecordProfile(int vcpCode) {
-    if (vcpCode <= 0 || vcpCode > 255) return false;
+    if (vcpCode < 0 || vcpCode > 255) return false;  // 0 is valid (Custom Color)
     for (int i = 0; i < gMonPresetCount; i++)
         if (gMonPresets[i].vcpCode == (BYTE)vcpCode) return false; // already recorded
     if (gMonPresetCount >= MAX_VCP14_VALS) return false;
@@ -443,7 +459,8 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
         ok = true;
     }
     // Profile mode: VCP 0xF0, store raw code (e.g. 0x0C=ComfortView, 0x0F=FPS...)
-    if (GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &vcpType, &vcpCur, &vcpMax) && vcpCur >= 1) {
+    // vcpCur=0 is a valid preset code (Custom Color); only skip when call fails
+    if (GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &vcpType, &vcpCur, &vcpMax)) {
         out->ProfileMode = (int)vcpCur;
         ok = true;
     }

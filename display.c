@@ -13,6 +13,7 @@
 #include <lowlevelmonitorconfigurationapi.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #pragma comment(lib, "Dxva2.lib")
 
@@ -28,6 +29,9 @@
 typedef struct {
     wchar_t deviceId[128];   // PHYSICAL_MONITOR description + "_N" index suffix
     DWORD   caps;            // MC_CAPS_* bitmask; 0 = not probed yet
+    // Supported VCP 0x14 values from capabilities string, e.g. "14(05 08 0B 0C)"
+    BYTE    vcp14Vals[16];   // list of supported VCP 0x14 codes (from caps string)
+    int     vcp14Count;      // 0 = not yet parsed
     // Original values snapshotted at first touch
     DWORD   bMin, bOrig, bMax;     // brightness
     DWORD   cMin, cOrig, cMax;     // contrast
@@ -44,6 +48,71 @@ static bool              gMonInited  = false;
 // -----------------------------------------------------------------------
 //  Internal helpers
 // -----------------------------------------------------------------------
+
+// Kelvin reference values for each MCCS VCP 0x14 code (index = VCP code)
+// Codes 0x01-0x0A are standard; 0x0B = Custom; 0x0C = User/Native (varies)
+static const int kVcp14Kelvin[] = {
+    0,      // 0x00 (invalid)
+    6500,   // 0x01 sRGB (~6500K)
+    6500,   // 0x02 Native
+    4000,   // 0x03 4000K
+    5000,   // 0x04 5000K
+    6500,   // 0x05 6500K
+    7500,   // 0x06 7500K
+    8200,   // 0x07 8200K
+    9300,   // 0x08 9300K
+    10000,  // 0x09 10000K
+    11500,  // 0x0A 11500K
+    6500,   // 0x0B Custom (treat as neutral)
+    6500,   // 0x0C User/Native (treat as neutral)
+};
+#define VCP14_KELVIN_COUNT ((int)(sizeof(kVcp14Kelvin)/sizeof(kVcp14Kelvin[0])))
+
+// Parse the capabilities string for "14(XX XX ...)" and store supported VCP codes.
+static void ParseVcp14Caps(const char* capStr, BYTE* vals, int* count) {
+    *count = 0;
+    if (!capStr) return;
+    const char* p = capStr;
+    // Find "14("
+    while (*p) {
+        if (p[0]=='1' && p[1]=='4' && p[2]=='(') break;
+        p++;
+    }
+    if (!*p) return;  // not found
+    p += 3;  // skip "14("
+    while (*p && *p != ')' && *count < 16) {
+        while (*p == ' ') p++;
+        if (*p == ')') break;
+        // Read hex byte
+        unsigned v = 0;
+        int digits = 0;
+        while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')) {
+            v = v * 16 + ((*p >= '0' && *p <= '9') ? *p-'0' :
+                          (*p >= 'a' && *p <= 'f') ? *p-'a'+10 : *p-'A'+10);
+            p++; digits++;
+        }
+        if (digits > 0) vals[(*count)++] = (BYTE)v;
+        while (*p == ' ') p++;
+    }
+}
+
+// Find the VCP 0x14 code in `vals` that is closest (by Kelvin) to `wantKelvin`.
+// Returns 0xFF if vals is empty.
+static BYTE FindClosestVcp14(const BYTE* vals, int count, int wantKelvin) {
+    if (count == 0) return 0xFF;
+    BYTE best = vals[0];
+    int  bestDiff = INT_MAX;
+    for (int i = 0; i < count; i++) {
+        BYTE code = vals[i];
+        // Skip Custom (0x0B) and User (0x0C) for Kelvin matching —
+        // only pick them if they're the only options.
+        if ((code == 0x0B || code == 0x0C) && count > 1) continue;
+        int k = (code < VCP14_KELVIN_COUNT) ? kVcp14Kelvin[code] : 6500;
+        int diff = k - wantKelvin; if (diff < 0) diff = -diff;
+        if (diff < bestDiff) { bestDiff = diff; best = code; }
+    }
+    return best;
+}
 
 // Map Kelvin → VCP 0x14 code (DDC/CI Color Preset, MCCS standard)
 static DWORD KelvinToVcp14(int kelvin) {
@@ -296,10 +365,28 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
         int si = GetOrAddMon(id);
         if (si >= 0) {
             if (gMon[si].caps == 0) {
-                // Lazy probe: GetMonitorCapabilities is fast and not I2C-intensive
                 DWORD c = 0, col = 0;
                 if (!GetMonitorCapabilities(h, &c, &col)) c = 0;
                 gMon[si].caps = c;
+            }
+            if (gMon[si].vcp14Count == 0) {
+                // Parse capabilities string for supported VCP 0x14 values.
+                // CapabilitiesRequestAndCapabilitiesReply is slow (~200ms) but only
+                // runs once per monitor per session.
+                DWORD capLen = 0;
+                if (GetCapabilitiesStringLength(h, &capLen) && capLen > 0) {
+                    char* capStr = (char*)malloc(capLen + 1);
+                    if (capStr) {
+                        capStr[0] = '\0';
+                        if (CapabilitiesRequestAndCapabilitiesReply(h, capStr, capLen))
+                            ParseVcp14Caps(capStr, gMon[si].vcp14Vals,
+                                                    &gMon[si].vcp14Count);
+                        free(capStr);
+                    }
+                }
+                // If still 0 (caps string missing/no 14(...)), mark as -1 to skip
+                // the slow cap request next time.
+                if (gMon[si].vcp14Count == 0) gMon[si].vcp14Count = -1;
             }
             caps       = gMon[si].caps;
             firstTouch = !gMon[si].hasSnapshot;
@@ -372,9 +459,22 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
             }
             if (got) {
                 if (firstTouch) vcp14Orig = vcpCur;
-                DWORD want14 = KelvinToVcp14(preset->ColorTemp);
-                CrashLog("[display] VCP14 cur=%lu want=%lu (K=%d)\n", vcpCur, want14, preset->ColorTemp);
-                if (want14 != vcpCur) {
+                // Map Kelvin to closest SUPPORTED VCP code for this monitor.
+                DWORD want14 = 0xFF;
+                if (si >= 0 && gMon[si].vcp14Count > 0) {
+                    // We have a parsed list — find the closest match.
+                    BYTE closest = FindClosestVcp14(gMon[si].vcp14Vals,
+                                                    gMon[si].vcp14Count,
+                                                    preset->ColorTemp);
+                    want14 = closest;
+                } else {
+                    // No capability list: fall back to standard MCCS mapping.
+                    want14 = KelvinToVcp14(preset->ColorTemp);
+                }
+                CrashLog("[display] VCP14 cur=%lu want=%lu (K=%d, supported-count=%d)\n",
+                         vcpCur, want14, preset->ColorTemp,
+                         si >= 0 ? gMon[si].vcp14Count : -1);
+                if (want14 != 0xFF && want14 != vcpCur) {
                     BOOL setOk = FALSE;
                     __try { setOk = SetVCPFeature(h, 0x14, want14); anySet = true; }
                     __except(EXCEPTION_EXECUTE_HANDLER) {

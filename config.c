@@ -116,7 +116,7 @@ void SaveMonPresets(void) {
     // Write each scanned entry under [MonitorPresets]
     // Key format: "XX" where XX = hex VCP code; value = "Name|B|C"
     for (int i = 0; i < gMonPresetCount; i++) {
-        if (!gMonPresets[i].vcpCode) continue;
+        // vcpCode==0 is valid (Custom Color); all entries 0..gMonPresetCount-1 are real
         wchar_t key[8], val[128];
         swprintf_s(key, _countof(key), L"%02X", gMonPresets[i].vcpCode);
         swprintf_s(val, _countof(val), L"%s|%d|%d",
@@ -141,8 +141,9 @@ void LoadMonPresets(void) {
         if (!GetPrivateProfileStringW(L"MonitorPresets", k, L"",
                                       val, _countof(val), path) || !val[0]) continue;
         unsigned code = 0;
-        swscanf_s(k, L"%X", &code);
-        if (!code || code > 255 || gMonPresetCount >= MAX_VCP14_VALS) continue;
+        // Use return value to detect malformed keys; code==0 is valid (Custom Color)
+        if (swscanf_s(k, L"%X", &code) != 1) continue;
+        if (code > 255 || gMonPresetCount >= MAX_VCP14_VALS) continue;
         int i = gMonPresetCount++;
         memset(&gMonPresets[i], 0, sizeof(gMonPresets[i]));
         gMonPresets[i].vcpCode    = (BYTE)code;

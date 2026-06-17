@@ -700,54 +700,80 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 }
             }
             if (id == IDC_PE_CAPTURE && code == BN_CLICKED) {
-                // Capture current monitor values into the selected preset.
+                // Capture current monitor B/C/preset into the selected display preset.
                 // DDC/CI takes ~150-300ms; disable form + show wait cursor.
                 if (gPeSelected >= 0 && gPeSelected < gNumPresets) {
                     EnableWindow(wnd, FALSE);
                     HCURSOR hOld = SetCursor(LoadCursorW(NULL, IDC_WAIT));
                     DISPLAY_PRESET captured;
                     bool captureOk = DisplayCaptureCurrent(NULL, &captured);
+                    // DisplayCaptureCurrent may miss VCP 0xF0 (no __try/__except, gMonInited
+                    // gate). Fall back to the dedicated exception-safe read used by
+                    // 'Record current' which was confirmed working.
+                    if (captured.ProfileMode == PRESET_UNSET) {
+                        int fallback = DisplayReadCurrentVcpF0();
+                        if (fallback != PRESET_UNSET) {
+                            captured.ProfileMode = fallback;
+                            captureOk = true; // at least something was read
+                        }
+                    }
                     SetCursor(hOld);
                     EnableWindow(wnd, TRUE);
                     SetForegroundWindow(wnd);
                     if (captureOk) {
-                        // Only overwrite fields that were successfully captured
                         DISPLAY_PRESET* p = &gPresets[gPeSelected];
+
+                        // --- Brightness ---
                         if (captured.Brightness != PRESET_UNSET) {
                             p->Brightness = captured.Brightness;
+                            SendDlgItemMessage(wnd, IDC_PE_BRIGHT, TBM_SETPOS, TRUE, p->Brightness);
                             CheckDlgButton(wnd, IDC_PE_BRIGHT_CHK, BST_CHECKED);
                         }
+
+                        // --- Contrast ---
                         if (captured.Contrast != PRESET_UNSET) {
                             p->Contrast = captured.Contrast;
+                            SendDlgItemMessage(wnd, IDC_PE_CONT, TBM_SETPOS, TRUE, p->Contrast);
                             CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_CHECKED);
                         }
+
+                        // Update slider labels (Brightness: XX / Contrast: XX%)
+                        PeUpdateLabels(wnd);
+
+                        // --- Monitor preset (VCP 0xF0) ---
+                        // Always fill: add to gMonPresets if new, stamp B/C for a richer
+                        // label, rebuild combo, then select — regardless of checkbox state.
                         if (captured.ProfileMode != PRESET_UNSET) {
                             p->ProfileMode = captured.ProfileMode;
-                            CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_CHECKED);
-                            // If this VCP code isn't in gMonPresets yet, add it so the
-                            // combo can show and select it (handles unseen presets and
-                            // monitors that were never fully scanned).
-                            bool added = DisplayRecordProfile(captured.ProfileMode);
-                            if (added) {
-                                // Stamp captured B/C onto the new entry for a useful label
-                                for (int _mi = 0; _mi < gMonPresetCount; _mi++) {
-                                    if (gMonPresets[_mi].vcpCode == (BYTE)captured.ProfileMode) {
+                            // Add to known presets if not already there
+                            DisplayRecordProfile(captured.ProfileMode);
+                            // Stamp captured B/C for a richer combo label
+                            for (int _mi = 0; _mi < gMonPresetCount; _mi++) {
+                                if (gMonPresets[_mi].vcpCode == (BYTE)captured.ProfileMode) {
+                                    if (captured.Brightness != PRESET_UNSET)
                                         gMonPresets[_mi].brightness = captured.Brightness;
-                                        gMonPresets[_mi].contrast   = captured.Contrast;
-                                        gMonPresets[_mi].scanned    =
-                                            (captured.Brightness != PRESET_UNSET ||
-                                             captured.Contrast   != PRESET_UNSET);
-                                        break;
-                                    }
+                                    if (captured.Contrast != PRESET_UNSET)
+                                        gMonPresets[_mi].contrast = captured.Contrast;
+                                    gMonPresets[_mi].scanned = true;
+                                    break;
                                 }
-                                // Rebuild combo so the new entry appears
-                                BuildProfileCombo(GetDlgItem(wnd, IDC_PE_PROFILE));
                             }
+                            SaveMonPresets();
+                            // Rebuild combo so new/updated entry appears, then select it
+                            HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
+                            BuildProfileCombo(prCb);
+                            int cnt = ComboBox_GetCount(prCb);
+                            for (int _ci = 0; _ci < cnt; _ci++) {
+                                if ((int)SendMessage(prCb, CB_GETITEMDATA, _ci, 0) == p->ProfileMode) {
+                                    ComboBox_SetCurSel(prCb, _ci);
+                                    break;
+                                }
+                            }
+                            // Always check — user asked preset to be filled regardless
+                            CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_CHECKED);
                         }
-                        PeLoadFields(wnd, gPeSelected);
+
                         SaveConfig();
-                        MessageBoxW(wnd, L"Current monitor values captured into preset.",
-                                    APPNAME, MB_OK | MB_ICONINFORMATION);
                     } else {
                         MessageBoxW(wnd, L"Could not read monitor values.\n"
                                     L"Make sure DDC/CI is enabled in the monitor OSD"

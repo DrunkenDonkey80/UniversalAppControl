@@ -386,11 +386,9 @@ bool IsProcessSuspended(DWORD processId) {
 }
 
 bool SuspendProcess(u32 id) {
-	//do not suspend if already suspended
-	if (IsProcessSuspended(id)) {
-		return true;
-	}
-
+	// NOTE: do NOT call IsProcessSuspended() here — it uses OpenThread which is
+	// blocked by anti-cheat/elevated games and returns wrong results (always "suspended").
+	// The caller (HandleProfile) tracks state via IsPaused flag instead.
 	HANDLE ProcessHandle = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, id);
 	if (ProcessHandle == NULL)
 	{
@@ -569,6 +567,10 @@ bool HideWindowForProfile(HWND hWnd, int profileId, HWND activeWindow) {
 
 		int op = gProfiles[profileId].Operation;
 		if ((op == PROF_OP_HIDE || op == PROF_OP_PAUSE) && IsWindowVisible(hWnd)) {
+			// Minimize first so fullscreen/exclusive-mode games exit before we hide.
+			// Without this SW_HIDE on a fullscreen DX window often does nothing.
+			if (!IsIconic(hWnd)) ShowWindow(hWnd, SW_MINIMIZE);
+			Sleep(80);
 			ShowWindow(hWnd, SW_HIDE);
 			windowChanged = true;
 		}

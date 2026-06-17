@@ -346,31 +346,50 @@ void DisplayInit(void) {
     }
 
     DestroyPhysicalMonitors(n, pm);
-    CrashLog("[display] Init done: caps=0x%08lX vcp14Count=%d vcpE2Count=%d\n",
-             gPrim.caps, gPrimaryVcp14Count, gPrimaryVcpE2Count);
+    CrashLog("[display] Init done: caps=0x%08lX vcp14=%d vcpE2=%d vcpF0=%d\n",
+             gPrim.caps, gPrimaryVcp14Count, gPrimaryVcpE2Count, gPrimaryVcpF0Count);
 }
 
 // Populate gMonPresets[] from the capabilities-string VCP codes discovered during
 // DisplayInit (gPrimaryVcpE2Vals).  Called once after LoadMonPresets() so that INI
 // entries loaded first are not re-added.  This means the combo is always pre-filled
 // with every mode the monitor advertises — no Capture button needed.
+// Known-good VCP 0xF0 picture-mode codes from Dell S3422DWG capabilities string.
+// These are confirmed writable from the original scan (F0 always reads 0x00 on this
+// monitor but writes DO switch the picture mode).  Used as fallback when the caps
+// string lists F0 without an explicit value block e.g. just "F0" not "F0(0C 0D ...)".
+static const BYTE kF0Defaults[] = {
+    0x0C,  // ComfortView
+    0x0D,  // Standard
+    0x0E,  // Movie
+    0x0F,  // FPS Game
+    0x10,  // RTS Game
+    0x11,  // RPG Game
+    0x13,  // Sports
+    0x31,  // Game 1 (custom)
+    0x32,  // Game 2 (custom)
+    0x34,  // Game 3 (custom)
+    0x36,  // Color Space
+};
+static const int kF0DefaultCount = (int)(sizeof(kF0Defaults) / sizeof(kF0Defaults[0]));
+
 void DisplayPopulatePresetsFromCaps(void) {
-    // Prefer VCP 0xF0 — confirmed writable on Dell monitors (old scan).
-    // E2 reads the current mode but writes are silently ignored on this hardware.
+    // VCP 0xF0 = confirmed WRITABLE on Dell monitors (old scan proved this).
+    // E2 reads the current mode but SetVCPFeature(E2,...) is silently ignored.
     if (gPrimaryVcpF0Count > 0) {
+        // Caps string had explicit F0(XX YY ...) block
         for (int i = 0; i < gPrimaryVcpF0Count; i++)
             DisplayRecordProfile(0xF0, (int)gPrimaryVcpF0Vals[i]);
-        CrashLog("[display] PopulatePresetsFromCaps: %d F0 entries -> gMonPresetCount=%d\n",
-                 gPrimaryVcpF0Count, gMonPresetCount);
-    } else if (gPrimaryVcpE2Count > 0) {
-        // Fallback: monitor has E2 but not F0 — may be writable on non-Dell hardware
-        for (int i = 0; i < gPrimaryVcpE2Count; i++)
-            DisplayRecordProfile(0xE2, (int)gPrimaryVcpE2Vals[i]);
-        CrashLog("[display] PopulatePresetsFromCaps: %d E2 entries (F0 absent) -> gMonPresetCount=%d\n",
-                 gPrimaryVcpE2Count, gMonPresetCount);
+        CrashLog("[display] Populate: %d F0 entries from caps\n", gPrimaryVcpF0Count);
     } else {
-        CrashLog("[display] PopulatePresetsFromCaps: no F0 or E2 caps found\n");
+        // Caps string lists F0 without explicit values (common on Dell).
+        // Use the hardcoded list confirmed by scan.
+        CrashLog("[display] Populate: F0 caps block absent (vcpF0Count=%d), using %d hardcoded defaults\n",
+                 gPrimaryVcpF0Count, kF0DefaultCount);
+        for (int i = 0; i < kF0DefaultCount; i++)
+            DisplayRecordProfile(0xF0, (int)kF0Defaults[i]);
     }
+    CrashLog("[display] Populate done: gMonPresetCount=%d\n", gMonPresetCount);
 }
 
 void DisplayRefresh(void) {

@@ -79,17 +79,17 @@ static BOOL DdcciGetFeature(HANDLE h, BYTE vcp, DWORD* pType, DWORD* pCur, DWORD
     return FALSE;
 }
 
-// Write + 80 ms post-delay + SAVE + readback verification + E2 diagnostic.
+// Write + 80 ms post-delay + SAVE + verification.
 //
-//  ddccontrol's analysis (docs/DDCCONTROL_ANALYSIS.md §4) suggests some monitors
-//  accept a value into a VCP register but won't apply it visually until they
-//  receive a DDC/CI SAVE command (0x0C).  Win32 exposes this via
-//  SaveCurrentMonitorSettings().  We always call it after a picture-mode write.
+//  Per docs/DDCCONTROL_ANALYSIS.md §10: VCP registers come in three types —
+//  value (stateful), command (write-only trigger), list (stateful enum).  Dell's
+//  F0 is a COMMAND register — reading it back is meaningless because the
+//  register isn't state.  Trying to verify F0 writes by reading F0 was wrong.
 //
-//  Diagnostic: when writing to F0 (picture-mode write register), also read back
-//  VCP 0xE2 (Dell's picture-mode READ register / actual visible mode).  If E2
-//  doesn't change after our F0 write, it means F0 is just a memory cell with
-//  no effect on the actual visible mode and we have to switch strategy.
+//  For command-style registers (F0): verify success by reading the corresponding
+//  STATE register (E2 on Dell) and seeing if its value changed.
+//  For value/list registers (brightness 0x10, contrast 0x12, color preset 0x14):
+//  read the same register back; matching value means write was accepted.
 static BOOL DdcciSetFeatureVerified(HANDLE h, BYTE vcp, DWORD want) {
     DdcciWaitInterOp();
     BOOL setOk = FALSE;
@@ -102,38 +102,35 @@ static BOOL DdcciSetFeatureVerified(HANDLE h, BYTE vcp, DWORD want) {
         return FALSE;
     }
 
-    // SAVE — ddccontrol equivalent of DDCCI_COMMAND_SAVE (0x0C).
-    // Tells the monitor to commit pending writes to its working state.
+    // SAVE — ddccontrol equivalent of DDCCI_COMMAND_SAVE (0x0C)
     BOOL saveOk = FALSE;
     __try { saveOk = SaveCurrentMonitorSettings(h); }
     __except(EXCEPTION_EXECUTE_HANDLER) { saveOk = FALSE; }
     DdcciStampOp();
     Sleep(DDC_POST_WRITE_MS);
-    CrashLog("[ddc] SaveCurrentMonitorSettings -> %d\n", saveOk);
 
-    // Readback the register we wrote
-    DWORD vt=0, got=0, vmax=0;
-    BOOL readOk = DdcciGetFeature(h, vcp, &vt, &got, &vmax);
-    if (readOk) {
-        if (got == want) CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX OK (verified)\n", vcp, want);
-        else             CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX REJECTED (readback=0x%02lX)\n", vcp, want, got);
-    } else {
-        CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX (no readback)\n", vcp, want);
-    }
-
-    // Diagnostic: if we wrote F0, also read E2 to see if the *visible* mode changed.
-    // If E2 stays at its previous value after F0 write+save, F0 is not the right register.
     if (vcp == 0xF0) {
+        // Command register: verify via E2 (the actual visible-mode state register)
         DWORD evt=0, ecur=0, emax=0;
-        if (DdcciGetFeature(h, 0xE2, &evt, &ecur, &emax))
-            CrashLog("[ddc] After F0 write: E2 reads 0x%02lX (expected change to reflect visible mode)\n", ecur);
-        else
-            CrashLog("[ddc] After F0 write: E2 read failed\n");
+        BOOL eok = DdcciGetFeature(h, 0xE2, &evt, &ecur, &emax);
+        CrashLog("[ddc] Write F0=0x%02lX save=%d E2=%s0x%02lX\n",
+                 want, saveOk, eok ? "" : "(read fail) ", ecur);
+        // We can't tell from caps whether E2 should equal F0_input or some
+        // other mapped value, so we can't fail the call.  Caller compares E2
+        // before/after across multiple Apply attempts to discover the mapping.
+        return TRUE;
+    } else {
+        // Value/list register: readback should match the value we wrote
+        DWORD vt=0, got=0, vmax=0;
+        BOOL readOk = DdcciGetFeature(h, vcp, &vt, &got, &vmax);
+        if (readOk) {
+            if (got == want) CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX OK (verified)\n", vcp, want);
+            else             CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX REJECTED (readback=0x%02lX)\n", vcp, want, got);
+        } else {
+            CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX (no readback)\n", vcp, want);
+        }
+        return TRUE;
     }
-
-    // Don't return FALSE just because readback didn't match — monitor may have
-    // mapped our value to something else.  Trust the SAVE call.
-    return TRUE;
 }
 
 // Exported: supported VCP 0x14 codes for primary monitor (populated at init).
@@ -775,18 +772,42 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
         if (vcp == 0) goto skip_preset;
         if (preset->ProfileMode == 0 && preset->ProfileModeVcp == 0) goto skip_preset;
         BYTE want = (BYTE)preset->ProfileMode;
+        // F0 is a command register — don't skip based on its read value
+        // (which is unreliable). Use gLastApplied.pm only as a memoization
+        // of "what did we last *send*". Trigger the write whenever forced
+        // OR the last-sent value differs OR the apply path believes the
+        // mode might be out-of-sync (E2 check below).
+        bool isCommand = (vcp == 0xF0);
         bool skip = !force && ((int)want == gLastApplied.pm);
+        if (isCommand && !force) {
+            // For command registers also verify via E2 that the visible
+            // mode actually reflects what we last sent. If not, re-send.
+            DWORD evt=0, ecur=0, emx=0;
+            if (DdcciGetFeature(h, 0xE2, &evt, &ecur, &emx)) {
+                if ((int)ecur != gLastApplied.pm) {
+                    CrashLog("[display] PM E2=0x%02lX != lastApplied=0x%02X, re-applying\n",
+                             ecur, gLastApplied.pm);
+                    skip = false;
+                } else if (firstTouch) {
+                    vcpE2Orig = ecur;
+                }
+            }
+        }
         if (skip) {
             CrashLog("[display] PM VCP=0x%02X val=0x%02X unchanged, skip\n", vcp, want);
         } else {
-            DWORD fType=0, fCur=0, fMax=0;
-            BOOL got = DdcciGetFeature(h, vcp, &fType, &fCur, &fMax);
-            if (got) {
-                if (firstTouch) vcpE2Orig = fCur;
-                if (force || fCur != want) {
-                    if (DdcciSetFeatureVerified(h, vcp, want)) anySet = true;
-                    gLastApplied.pm = (int)want;
-                } else {
+            if (isCommand) {
+                // Always send for command registers — no read-skip optimization
+                if (DdcciSetFeatureVerified(h, vcp, want)) anySet = true;
+                gLastApplied.pm = (int)want;
+            } else {
+                DWORD fType=0, fCur=0, fMax=0;
+                BOOL got = DdcciGetFeature(h, vcp, &fType, &fCur, &fMax);
+                if (got) {
+                    if (firstTouch) vcpE2Orig = fCur;
+                    if (force || fCur != want) {
+                        if (DdcciSetFeatureVerified(h, vcp, want)) anySet = true;
+                    }
                     gLastApplied.pm = (int)want;
                 }
             }

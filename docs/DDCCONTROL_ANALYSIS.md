@@ -233,6 +233,65 @@ Ordered by likely-impact:
 
 ---
 
-## 10. One-paragraph summary for the next attempt
+## 10. Critical finding: VCP control types (value / command / list)
+
+From `src/lib/monitor_db.h`:
+
+```c
+enum control_type {
+    value   = 0,   // continuous range; read-write stateful (brightness, contrast)
+    command = 1,   // write-only trigger; reads return NACK or junk (mode switch, degauss)
+    list    = 2,   // discrete enum; read-write stateful (color preset: 0=sRGB, 1=Cool, ...)
+};
+```
+
+**F0 on Dell is a `command`, not a value.** That's why the symptoms are what they are:
+
+| What we see | Why |
+|---|---|
+| F0 reads 0 when mode set via OSD | F0 isn't a state register; the OSD doesn't update it |
+| F0 reads 0x0E after we wrote 0x0E | Some firmware paths happen to leave the last-written command in F0 as a side effect, others zero it. Not reliable. |
+| Game1 not readable, Game2/3 readable | Firmware quirk: different mode-change paths handle F0 differently. Not by design. |
+| Some F0 writes change the visible mode, others don't | The Dell firmware accepts the I²C transaction (so our "verified" readback passes) but may silently no-op the command if e.g. the monitor input doesn't support that mode, HDR is on, etc. |
+
+### Read-reply NACK byte
+
+From `src/lib/ddcci.c:415`:
+
+```c
+if (len == sizeof(buf) && buf[0] == DDCCI_REPLY_READ && buf[2] == ctrl) {
+    if (value)   *value   = buf[6] * 256 + buf[7];
+    if (maximum) *maximum = buf[4] * 256 + buf[5];
+    return !buf[1];   // <-- NACK byte. 0 = supported, non-zero = not supported.
+}
+```
+
+The DDC/CI READ REPLY has 8 bytes:
+- `buf[0]` = reply opcode `0x02`
+- `buf[1]` = **NACK flag** (0 = supported, !=0 = not supported / temporarily unavailable)
+- `buf[2]` = VCP code echoed back
+- `buf[3]` = VCP type byte (MCCS class)
+- `buf[4..5]` = maximum value, big-endian
+- `buf[6..7]` = current value, big-endian
+
+**When `buf[1] != 0`, `buf[6..7]` is meaningless.** ddccontrol's `dumpctrl` shows `+` (NACK==0) or `-` (NACK!=0) accordingly.
+
+Win32's `GetVCPFeatureAndVCPFeatureReply` returns `BOOL` and **does not expose this NACK byte to userspace**. It returns TRUE with cur=0 for NACK'd reads. We cannot distinguish "F0 read returned 0 because the value really is 0" from "F0 read NACK'd because the mode isn't F0-readable".
+
+### Implications for UAC
+
+1. **Stop verifying F0 writes by reading F0 back.** F0 is a command — it's not stateful. The fact that our "verified" log line says OK is meaningless; the monitor accepted the I²C transaction but may have ignored the command.
+
+2. **Verify F0 writes by reading E2.** E2 is the state register. If E2 changes after our F0 write, the command worked visually. If E2 stays the same, the F0 command was a no-op.
+
+3. **F0 codes are advertised in caps but not all are functional in all contexts.** The capabilities string `F0(0D 0E 0C 0F 10 11 13 31 32 34 36)` lists supported *commands*, but firmware may reject some commands depending on the current input source / HDR state / connected GPU. The user has to try each and see.
+
+4. **There is no Win32 API to send a bare DDC/CI command** (like ddccontrol's `ddcci_command(0x0C)` for SAVE without a value). The closest equivalent is `SaveCurrentMonitorSettings()`, which is supposed to send the SAVE command internally.
+
+5. **ddccontrol-db is the right answer for getting friendly names + reliable VCP code lists.** They hand-curate a per-monitor XML with `<control type="command" address="0xF0">` and a list of valid `<value name="Standard" value="0x0D"/>` entries for each Dell model. Without it, we're stuck with raw hex.
+
+---
+
+## 11. One-paragraph summary for the next attempt
 
 **ddccontrol succeeds where UAC fails because of timing discipline and protocol completeness, not because of any secret VCP code.** It enforces a 45 ms gap between every I²C operation, an 80 ms gap after every write, retries reads 3× automatically, optionally issues a `0x0C` SAVE command, and has a per-monitor database of unlock sequences (Samsung's `0xF5 = 1`). UAC currently writes back-to-back without inter-op delays, doesn't retry, doesn't SAVE, and doesn't unlock — any one of those four could explain why F0 writes "work sometimes, randomly switch modes other times". The fixes are mechanical and small.

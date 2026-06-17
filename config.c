@@ -112,19 +112,10 @@ static void WriteBool(const wchar_t* section, const wchar_t* key, BOOL v) {
 
 // Save the scanned preset table so we don't need to re-scan every session.
 void SaveMonPresets(void) {
-    const wchar_t* path = GetConfigPath();
-    // Write each scanned entry under [MonitorPresets]
-    // Key format: "XX" where XX = hex VCP code; value = "Name|B|C"
-    for (int i = 0; i < gMonPresetCount; i++) {
-        // vcpCode==0 is valid (Custom Color); all entries 0..gMonPresetCount-1 are real
-        wchar_t key[8], val[128];
-        swprintf_s(key, _countof(key), L"%02X", gMonPresets[i].vcpCode);
-        swprintf_s(val, _countof(val), L"%s|%d|%d",
-                   gMonPresets[i].name,
-                   gMonPresets[i].brightness,
-                   gMonPresets[i].contrast);
-        WritePrivateProfileStringW(L"MonitorPresets", key, val, path);
-    }
+    // SaveConfig() already writes [MonitorPresets] after its DeleteFileW.
+    // This function is kept for callers that update gMonPresets outside of
+    // a full SaveConfig round-trip; it just delegates to a full save.
+    SaveConfig();
 }
 
 // Load previously-recorded preset list from INI into gMonPresets[].
@@ -169,6 +160,8 @@ void SaveConfig(void) {
     const wchar_t* path = GetConfigPath();
     // Delete and recreate to ensure all old sections are gone.
     DeleteFileW(path);
+    // NOTE: SaveMonPresets() must be called AFTER this function so it writes
+    // into the freshly-recreated file, not before it gets deleted.
 
     WriteBool(L"general", L"Debug", gConfig.Debug);
     WriteBool(L"general", L"DisplayControl", gDisplayControlEnabled);
@@ -195,6 +188,17 @@ void SaveConfig(void) {
             swprintf_s(tmp, _countof(tmp), L"%d", gPresets[i].ProfileMode);
             WritePrivateProfileStringW(section, L"ProfileMode", tmp, path);
         }
+    }
+
+    // Write monitor preset entries (must come after DeleteFileW above)
+    for (int i = 0; i < gMonPresetCount; i++) {
+        wchar_t key[8], val[128];
+        swprintf_s(key, _countof(key), L"%02X", gMonPresets[i].vcpCode);
+        swprintf_s(val, _countof(val), L"%s|%d|%d",
+                   gMonPresets[i].name,
+                   gMonPresets[i].brightness,
+                   gMonPresets[i].contrast);
+        WritePrivateProfileStringW(L"MonitorPresets", key, val, path);
     }
 
     for (int i = 0; i < gNumProfiles; i++) {

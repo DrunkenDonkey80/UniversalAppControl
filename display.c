@@ -376,20 +376,29 @@ static const int kF0DefaultCount = (int)(sizeof(kF0Defaults) / sizeof(kF0Default
 void DisplayPopulatePresetsFromCaps(void) {
     // VCP 0xF0 = confirmed WRITABLE on Dell monitors (old scan proved this).
     // E2 reads the current mode but SetVCPFeature(E2,...) is silently ignored.
+    // First: remove any stale E2-only entries loaded from INI — they don't write
+    // and just fill up the limited gMonPresets array preventing F0 from being added.
+    int kept = 0;
+    for (int i = 0; i < gMonPresetCount; i++) {
+        if (gMonPresets[i].vcpReg != 0xE2)
+            gMonPresets[kept++] = gMonPresets[i];
+        else
+            CrashLog("[display] Populate: dropping stale E2:%02X entry\n", gMonPresets[i].vcpCode);
+    }
+    gMonPresetCount = kept;
+
+    // Now add F0 entries
     if (gPrimaryVcpF0Count > 0) {
-        // Caps string had explicit F0(XX YY ...) block
         for (int i = 0; i < gPrimaryVcpF0Count; i++)
             DisplayRecordProfile(0xF0, (int)gPrimaryVcpF0Vals[i]);
         CrashLog("[display] Populate: %d F0 entries from caps\n", gPrimaryVcpF0Count);
     } else {
-        // Caps string lists F0 without explicit values (common on Dell).
-        // Use the hardcoded list confirmed by scan.
-        CrashLog("[display] Populate: F0 caps block absent (vcpF0Count=%d), using %d hardcoded defaults\n",
-                 gPrimaryVcpF0Count, kF0DefaultCount);
+        CrashLog("[display] Populate: no F0 caps block, using %d hardcoded defaults\n", kF0DefaultCount);
         for (int i = 0; i < kF0DefaultCount; i++)
             DisplayRecordProfile(0xF0, (int)kF0Defaults[i]);
     }
     CrashLog("[display] Populate done: gMonPresetCount=%d\n", gMonPresetCount);
+    SaveMonPresets(); // persist the clean F0-only list so E2 entries don't reload next time
 }
 
 void DisplayRefresh(void) {

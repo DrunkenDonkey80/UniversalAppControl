@@ -266,7 +266,8 @@ static bool ReadConfig() {
 			wchar_t tmp[64] = { 0 };
 			gPresets[gNumPresets].Brightness = PRESET_UNSET;
 			gPresets[gNumPresets].Contrast   = PRESET_UNSET;
-			gPresets[gNumPresets].ColorTemp  = PRESET_UNSET;
+			gPresets[gNumPresets].ColorTemp   = PRESET_UNSET;
+			gPresets[gNumPresets].ProfileMode = PRESET_UNSET;
 			if (GetPrivateProfileStringW(sectionName, L"Brightness", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
 				gPresets[gNumPresets].Brightness = _wtoi(tmp);
 			memset(tmp, 0, sizeof(tmp));
@@ -275,6 +276,8 @@ static bool ReadConfig() {
 			memset(tmp, 0, sizeof(tmp));
 			if (GetPrivateProfileStringW(sectionName, L"ColorTemp", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
 				gPresets[gNumPresets].ColorTemp = _wtoi(tmp);
+			if (GetPrivateProfileStringW(sectionName, L"ProfileMode", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
+				gPresets[gNumPresets].ProfileMode = _wtoi(tmp);
 			gNumPresets++;
 		}
 		else if (wcsncmp(sectionName, L"preset:", 7) != 0 && gNumProfiles < MAX_PROFILES) {

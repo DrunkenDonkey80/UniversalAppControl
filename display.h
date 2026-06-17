@@ -15,8 +15,13 @@
 extern BYTE gPrimaryVcp14Vals[MAX_VCP14_VALS];
 extern int  gPrimaryVcp14Count;
 
-// Human-readable label for a VCP 0x14 code (e.g. 0x05 -> L"6500K").
+// Supported VCP 0xF0 codes for primary monitor (11 named preset modes).
+extern BYTE gPrimaryVcpF0Vals[MAX_VCP14_VALS];
+extern int  gPrimaryVcpF0Count;
+
+// Human-readable labels.
 const wchar_t* GetVcp14Label(BYTE code);
+const wchar_t* GetVcpF0Label(BYTE code);
 
 // -----------------------------------------------------------------------
 //  Public API

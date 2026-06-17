@@ -494,6 +494,15 @@ static void PeLoadFields(HWND wnd, int idx) {
                        (p->ColorTemp != PRESET_UNSET && ctSel > 0)
                            ? BST_CHECKED : BST_UNCHECKED);
     }
+    // Monitor Preset label
+    if (p->ProfileMode != PRESET_UNSET) {
+        wchar_t pmBuf[64];
+        swprintf_s(pmBuf, _countof(pmBuf), L"%s (0x%02X)",
+                   GetVcpF0Label((BYTE)p->ProfileMode), (BYTE)p->ProfileMode);
+        SetDlgItemTextW(wnd, IDC_PE_PROFILE_LBL, pmBuf);
+    } else {
+        SetDlgItemTextW(wnd, IDC_PE_PROFILE_LBL, L"(not captured)");
+    }
     PeUpdateLabels(wnd);
 }
 
@@ -605,6 +614,13 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             ComboBox_SetCurSel(ctCombo, 0);
             ey += 32;
 
+            // Monitor Preset (VCP 0xF0): label + read-only display
+            MakeChild(wnd, L"STATIC", L"Monitor preset:",
+                SS_LEFT, ex, ey+3, 90, 18, 0);
+            MakeChild(wnd, L"STATIC", L"(use Capture)",
+                SS_LEFT|SS_SUNKEN, ex+94, ey, ew-94, 24, IDC_PE_PROFILE_LBL);
+            ey += 30;
+
             // Capture full-width
             MakeBtn(wnd, L"Capture from monitor", ex, ey, ew, 26, IDC_PE_CAPTURE);
             ey += 34;
@@ -700,6 +716,9 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                         if (captured.ColorTemp != PRESET_UNSET) {
                             p->ColorTemp = captured.ColorTemp;
                             CheckDlgButton(wnd, IDC_PE_CTEMP_CHK, BST_CHECKED);
+                        }
+                        if (captured.ProfileMode != PRESET_UNSET) {
+                            p->ProfileMode = captured.ProfileMode;
                         }
                         PeLoadFields(wnd, gPeSelected);
                         SaveConfig();

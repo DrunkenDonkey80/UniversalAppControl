@@ -264,7 +264,90 @@ int RunMonitorDebug(void) {
                     STEP("CapabilitiesRequestAndCapabilitiesReply");
                     if (CapabilitiesRequestAndCapabilitiesReply(h, cs, capLen)) {
                         cs[capLen] = 0;
-                        MdLog("OK  \"%.200s\"\n", cs);
+                        // Print full string in 200-char chunks
+                        MdLog("OK  len=%lu full string:\n", capLen);
+                        for (DWORD off = 0; off < capLen; off += 200)
+                            MdLog("  %.200s\n", cs + off);
+
+                        // --- Probe VCP 0xDC (Preset Mode / Display Mode) ---
+                        MdLog("\n  [VCP 0xDC - Preset/Display Mode]\n");
+                        {
+                            DWORD dType=0, dCur=0, dMax=0; BOOL dok=FALSE; DWORD dSeh=0;
+                            STEP("GetVCPFeatureAndVCPFeatureReply(0xDC)");
+                            __try { dok = GetVCPFeatureAndVCPFeatureReply(h, 0xDC, &dType, &dCur, &dMax); }
+                            __except(dSeh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){dok=FALSE;}
+                            if (dSeh) { CRASH_(dSeh); }
+                            else if (dok) {
+                                MdLog(" OK  cur=0x%02lX (%lu)  max=0x%02lX (%lu)  type=%lu\n",
+                                      dCur, dCur, dMax, dMax, dType);
+                                // Parse DC(...) from caps string to list supported values
+                                const char* dcp = cs;
+                                while (*dcp) {
+                                    if (dcp[0]=='D'&&dcp[1]=='C'&&dcp[2]=='(') break;
+                                    dcp++;
+                                }
+                                if (*dcp) {
+                                    dcp += 3;
+                                    MdLog("  Supported DC values: ");
+                                    while (*dcp && *dcp!=')') {
+                                        while (*dcp==' ') dcp++;
+                                        unsigned v=0; int nd=0;
+                                        while((*dcp>='0'&&*dcp<='9')||(*dcp>='a'&&*dcp<='f')||(*dcp>='A'&&*dcp<='F')){
+                                            v=v*16+((*dcp>='0'&&*dcp<='9')?*dcp-'0':(*dcp>='a'&&*dcp<='f')?*dcp-'a'+10:*dcp-'A'+10);
+                                            dcp++; nd++;
+                                        }
+                                        if (nd>0) MdLog("0x%02X ", v);
+                                        while (*dcp==' ') dcp++;
+                                    }
+                                    MdLog("\n");
+                                }
+                                // Try SetVCPFeature idempotent
+                                BOOL sdc=FALSE;
+                                STEP("SetVCPFeature(0xDC, cur)");
+                                __try { sdc = SetVCPFeature(h, 0xDC, dCur); }
+                                __except(dSeh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){sdc=FALSE;}
+                                if (dSeh) CRASH_(dSeh);
+                                else if (sdc) OK_;
+                                else FAIL_(GetLastError());
+                            } else { MdLog(" FAILED err=0x%lx\n", GetLastError()); }
+                        }
+
+                        // --- Probe VCP 0xF0 (11-profile Preset Mode) ---
+                        MdLog("\n  [VCP 0xF0 - Preset Mode (11 profiles)]\n");
+                        {
+                            DWORD fType=0,fCur=0,fMax=0; BOOL fok=FALSE; DWORD fSeh=0;
+                            STEP("GetVCPFeatureAndVCPFeatureReply(0xF0)");
+                            __try { fok = GetVCPFeatureAndVCPFeatureReply(h,0xF0,&fType,&fCur,&fMax); }
+                            __except(fSeh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){fok=FALSE;}
+                            if (fSeh) { CRASH_(fSeh); }
+                            else if (fok) {
+                                MdLog(" OK  cur=0x%02lX  max=0x%02lX  type=%lu\n",fCur,fMax,fType);
+                                // Extract F0(...) values from caps string
+                                const char* fp=cs;
+                                while(*fp){if(fp[0]=='F'&&fp[1]=='0'&&fp[2]=='(')break;fp++;}
+                                if(*fp){ fp+=3;
+                                    MdLog("  Supported F0 values: ");
+                                    while(*fp&&*fp!=')'){
+                                        while(*fp==' ')fp++;
+                                        unsigned v=0;int nd=0;
+                                        while((*fp>='0'&&*fp<='9')||(*fp>='a'&&*fp<='f')||(*fp>='A'&&*fp<='F')){
+                                            v=v*16+((*fp>='0'&&*fp<='9')?*fp-'0':(*fp>='a'&&*fp<='f')?*fp-'a'+10:*fp-'A'+10);
+                                            fp++;nd++;
+                                        }
+                                        if(nd>0)MdLog("0x%02X ",v);
+                                        while(*fp==' ')fp++;
+                                    }
+                                    MdLog("\n");
+                                }
+                                BOOL sof=FALSE;
+                                STEP("SetVCPFeature(0xF0, cur)");
+                                __try{sof=SetVCPFeature(h,0xF0,fCur);}
+                                __except(fSeh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){sof=FALSE;}
+                                if(fSeh)CRASH_(fSeh);
+                                else if(sof)OK_;
+                                else FAIL_(GetLastError());
+                            } else { MdLog(" FAILED err=0x%lx\n",GetLastError()); }
+                        }
                     } else { FAIL_(GetLastError()); }
                     free(cs);
                 }

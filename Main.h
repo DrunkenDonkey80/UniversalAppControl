@@ -48,7 +48,10 @@ typedef struct _DISPLAY_PRESET
 	wchar_t Name[MAX_NAME];
 	int Brightness;   // 0-100 percent, or PRESET_UNSET
 	int Contrast;     // 0-100 percent, or PRESET_UNSET
-	int ColorTemp;    // Kelvin (4000/5000/6500/7500/8200/9300/10000/11500), or PRESET_UNSET
+	int ColorTemp;    // VCP 0x14 code (1-255), legacy Kelvin (>=256), or PRESET_UNSET
+	int ProfileMode;  // VCP 0xF0 code (1-255) or PRESET_UNSET
+	                  // Selects the monitor's named preset (ComfortView=0x0C, FPS=0x0F...)
+	                  // Applied FIRST so B/C/CT can override the preset defaults.
 } DISPLAY_PRESET;
 
 

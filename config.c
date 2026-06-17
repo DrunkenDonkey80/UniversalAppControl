@@ -100,7 +100,8 @@ int GetOrCreatePreset(const wchar_t* name) {
     wcscpy_s(gPresets[i].Name, MAX_NAME, name);
     gPresets[i].Brightness = PRESET_UNSET;
     gPresets[i].Contrast   = PRESET_UNSET;
-    gPresets[i].ColorTemp  = PRESET_UNSET;
+    gPresets[i].ColorTemp   = PRESET_UNSET;
+    gPresets[i].ProfileMode = PRESET_UNSET;
     return i;
 }
 
@@ -133,6 +134,10 @@ void SaveConfig(void) {
         if (gPresets[i].ColorTemp != PRESET_UNSET) {
             swprintf_s(tmp, _countof(tmp), L"%d", gPresets[i].ColorTemp);
             WritePrivateProfileStringW(section, L"ColorTemp", tmp, path);
+        }
+        if (gPresets[i].ProfileMode != PRESET_UNSET) {
+            swprintf_s(tmp, _countof(tmp), L"%d", gPresets[i].ProfileMode);
+            WritePrivateProfileStringW(section, L"ProfileMode", tmp, path);
         }
     }
 

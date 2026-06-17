@@ -22,7 +22,8 @@
 typedef struct {
     DWORD bMin, bOrig, bMax;   // brightness snapshot
     DWORD cMin, cOrig, cMax;   // contrast snapshot
-    DWORD origVcp14;            // color-temp VCP code at first touch
+    DWORD origVcp14;            // VCP 0x14 color-temp code at first touch
+    DWORD origVcpF0;            // VCP 0xF0 preset mode at first touch
     DWORD caps;                 // MC_CAPS_* bitmask
     bool  hasSnapshot;
     bool  capsProbed;
@@ -37,10 +38,13 @@ static bool              gMonInited  = false;
 BYTE gPrimaryVcp14Vals[MAX_VCP14_VALS] = {0};
 int  gPrimaryVcp14Count = 0;  // 0 = not probed, -1 = not supported
 
+// Exported: supported VCP 0xF0 codes (named preset modes, e.g. ComfortView/FPS/Game1).
+BYTE gPrimaryVcpF0Vals[MAX_VCP14_VALS] = {0};
+int  gPrimaryVcpF0Count = 0;
+
 // Last values WE applied (worker-thread only; no locking needed).
-// Comparing preset values against this avoids redundant DDC/CI I2C traffic.
-static struct { int b, c, ct; } gLastApplied =
-    { PRESET_UNSET, PRESET_UNSET, PRESET_UNSET };
+static struct { int b, c, ct, pm; } gLastApplied =
+    { PRESET_UNSET, PRESET_UNSET, PRESET_UNSET, PRESET_UNSET };
 
 // -----------------------------------------------------------------------
 //  Helpers
@@ -159,10 +163,34 @@ const wchar_t* GetVcp14Label(BYTE code) {
     }
 }
 
+// VCP 0xF0 preset mode labels for Dell S3422DWG (verified from ddcutil community docs).
+// 0x0C=ComfortView confirmed; game codes match Dell AW3425DW/S-series pattern.
+const wchar_t* GetVcpF0Label(BYTE code) {
+    switch (code) {
+        case 0x0C: return L"ComfortView";
+        case 0x0D: return L"Standard";
+        case 0x0E: return L"Movie";
+        case 0x0F: return L"FPS Game";
+        case 0x10: return L"RTS Game";
+        case 0x11: return L"RPG Game";
+        case 0x13: return L"Sports";
+        case 0x31: return L"Game 1";
+        case 0x32: return L"Game 2";
+        case 0x34: return L"Game 3";
+        case 0x36: return L"Color Space";
+        default: {
+            static wchar_t buf[16];
+            swprintf_s(buf, 16, L"Preset 0x%02X", code);
+            return buf;
+        }
+    }
+}
+
 void DisplayResetLastApplied(void) {
     gLastApplied.b  = PRESET_UNSET;
     gLastApplied.c  = PRESET_UNSET;
     gLastApplied.ct = PRESET_UNSET;
+    gLastApplied.pm = PRESET_UNSET;
 }
 
 // -----------------------------------------------------------------------
@@ -218,11 +246,44 @@ void DisplayInit(void) {
                 BYTE vals[MAX_VCP14_VALS];
                 ParseVcp14Caps(capStr, vals, &cnt);
                 EnterCriticalSection(&gMonLock);
+                // Parse VCP 0x14 (color temperature presets)
                 if (cnt > 0) {
                     memcpy(gPrimaryVcp14Vals, vals, (size_t)cnt);
                     gPrimaryVcp14Count = cnt;
                 } else {
-                    gPrimaryVcp14Count = -1;  // no VCP 14 in caps string
+                    gPrimaryVcp14Count = -1;
+                }
+                // Parse VCP 0xF0 (named display presets: ComfortView, FPS, Game1...)
+                {
+                    int cntF0 = 0; BYTE valsF0[MAX_VCP14_VALS];
+                    // Reuse capStr which is still in scope
+                    const char* p = capStr;
+                    // Find "F0(" in the capabilities string
+                    while (*p) {
+                        if (p[0]=='F' && p[1]=='0' && p[2]=='(') break;
+                        p++;
+                    }
+                    if (*p) {
+                        p += 3;
+                        while (*p && *p != ')' && cntF0 < MAX_VCP14_VALS) {
+                            while (*p == ' ') p++;
+                            if (*p == ')') break;
+                            unsigned v=0; int d=0;
+                            while ((*p>='0'&&*p<='9')||(*p>='a'&&*p<='f')||(*p>='A'&&*p<='F')) {
+                                v=v*16+((*p>='0'&&*p<='9')?*p-'0':
+                                        (*p>='a'&&*p<='f')?*p-'a'+10:*p-'A'+10);
+                                p++; d++;
+                            }
+                            if (d > 0) valsF0[cntF0++] = (BYTE)v;
+                            while (*p == ' ') p++;
+                        }
+                    }
+                    if (cntF0 > 0) {
+                        memcpy(gPrimaryVcpF0Vals, valsF0, (size_t)cntF0);
+                        gPrimaryVcpF0Count = cntF0;
+                    } else {
+                        gPrimaryVcpF0Count = -1;
+                    }
                 }
                 LeaveCriticalSection(&gMonLock);
             }
@@ -314,9 +375,10 @@ int DisplayListUnsupported(wchar_t names[][128], int maxOut) {
 bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
     (void)hwnd;   // always uses primary
     if (!out || !gMonInited) return false;
-    out->Brightness = PRESET_UNSET;
-    out->Contrast   = PRESET_UNSET;
-    out->ColorTemp  = PRESET_UNSET;
+    out->Brightness  = PRESET_UNSET;
+    out->Contrast    = PRESET_UNSET;
+    out->ColorTemp   = PRESET_UNSET;
+    out->ProfileMode = PRESET_UNSET;
 
     PHYSICAL_MONITOR pm[MAX_PHYSICAL_PER_HMONITOR];
     DWORD n = OpenPrimaryPhysicals(pm, MAX_PHYSICAL_PER_HMONITOR);
@@ -337,10 +399,15 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
     if ((caps & MC_CAPS_CONTRAST)   && GetMonitorContrast(h, &mn, &cur, &mx))
         { out->Contrast   = RawToPct(cur, mn, mx); ok = true; }
 
-    // Read VCP 0x14 and store the raw code directly (1-12).
+    // Color temperature: VCP 0x14, store raw code (1-12)
     DWORD vcpType=0, vcpCur=0, vcpMax=0;
     if (GetVCPFeatureAndVCPFeatureReply(h, 0x14, &vcpType, &vcpCur, &vcpMax) && vcpCur >= 1) {
-        out->ColorTemp = (int)vcpCur;   // direct VCP code
+        out->ColorTemp = (int)vcpCur;
+        ok = true;
+    }
+    // Profile mode: VCP 0xF0, store raw code (e.g. 0x0C=ComfortView, 0x0F=FPS...)
+    if (GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &vcpType, &vcpCur, &vcpMax) && vcpCur >= 1) {
+        out->ProfileMode = (int)vcpCur;
         ok = true;
     }
 
@@ -384,6 +451,34 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
     DWORD bMin=0, bOrig=0, bMax=0;
     DWORD cMin=0, cOrig=0, cMax=0;
     DWORD vcp14Orig = 0;
+    DWORD vcpF0Orig = 0;
+
+    // Profile Mode (VCP 0xF0) — applied FIRST so B/C/CT override preset defaults
+    if (preset->ProfileMode != PRESET_UNSET) {
+        BYTE want = (BYTE)preset->ProfileMode;
+        bool skip = !force && ((int)want == gLastApplied.pm);
+        if (skip) {
+            CrashLog("[display] PM=0x%02X unchanged, skip\n", want);
+        } else {
+            DWORD fType=0, fCur=0, fMax=0; BOOL got=FALSE;
+            __try { got = GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &fType, &fCur, &fMax); }
+            __except(EXCEPTION_EXECUTE_HANDLER) { }
+            if (got) {
+                if (firstTouch && fCur) vcpF0Orig = fCur;
+                if (force || (BYTE)fCur != want) {
+                    BOOL setOk=FALSE;
+                    __try { setOk = SetVCPFeature(h, 0xF0, want); anySet = true; }
+                    __except(EXCEPTION_EXECUTE_HANDLER) { }
+                    gLastApplied.pm = (int)want;
+                    CrashLog("[display] SetVCPF0 0x%02X -> %d\n", want, setOk);
+                    // Dell resets B/C after preset switch; small yield gives it time
+                    Sleep(80);
+                } else {
+                    gLastApplied.pm = (int)want;
+                }
+            }
+        }
+    }
 
     // Brightness
     if (preset->Brightness != PRESET_UNSET && (caps & MC_CAPS_BRIGHTNESS)) {
@@ -464,7 +559,8 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
         if (!gPrim.hasSnapshot) {
             if (bMax > bMin) { gPrim.bMin=bMin; gPrim.bOrig=bOrig; gPrim.bMax=bMax; }
             if (cMax > cMin) { gPrim.cMin=cMin; gPrim.cOrig=cOrig; gPrim.cMax=cMax; }
-            if (vcp14Orig)    gPrim.origVcp14 = vcp14Orig;
+            if (vcp14Orig)    gPrim.origVcp14  = vcp14Orig;
+            if (vcpF0Orig)    gPrim.origVcpF0  = vcpF0Orig;
             gPrim.hasSnapshot = true;
         }
         LeaveCriticalSection(&gMonLock);
@@ -492,9 +588,11 @@ void DisplayRestoreAll(void) {
     if (n == 0) return;
 
     HANDLE h = pm[0].hPhysicalMonitor;
+    // Restore preset mode first, then B/C/CT on top
+    if (snap.origVcpF0)        SetVCPFeature(h, 0xF0,  snap.origVcpF0);
+    if (snap.origVcp14)        SetVCPFeature(h, 0x14,  snap.origVcp14);
     if (snap.bMax > snap.bMin) SetMonitorBrightness(h, snap.bOrig);
     if (snap.cMax > snap.cMin) SetMonitorContrast(h,   snap.cOrig);
-    if (snap.origVcp14)        SetVCPFeature(h, 0x14,  snap.origVcp14);
 
     DestroyPhysicalMonitors(n, pm);
 

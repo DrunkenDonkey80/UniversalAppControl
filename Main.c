@@ -390,9 +390,9 @@ bool SuspendProcess(u32 id) {
 	// blocked by anti-cheat/elevated games and returns wrong results (always "suspended").
 	// The caller (HandleProfile) tracks state via IsPaused flag instead.
 	HANDLE ProcessHandle = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, id);
-	if (ProcessHandle == NULL)
-	{
-		MsgBox(L"Failed to open process %d! Error 0x%08lx", APPNAME L" Error", MB_OK | MB_ICONERROR, id, GetLastError());
+	if (ProcessHandle == NULL) {
+		// Silent failure — NO MsgBox (would appear behind fullscreen game and freeze UAC)
+		CrashLog("[suspend] OpenProcess pid=%u FAILED err=0x%08lX\n", id, GetLastError());
 		return false;
 	}
 
@@ -427,14 +427,13 @@ bool ResumeProcess(u32 id) {
 		}
 	}
 	HANDLE ProcessHandle = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, id);
-	if (ProcessHandle == NULL)
-	{
-		MsgBox(L"Failed to open process %d! Error 0x%08lx", APPNAME L" Error", MB_OK | MB_ICONERROR, id, GetLastError());
+	if (ProcessHandle == NULL) {
+		CrashLog("[resume] OpenProcess pid=%u FAILED err=0x%08lX\n", id, GetLastError());
 		return false;
 	}
 	NtResumeProcess(ProcessHandle);
 	CloseHandle(ProcessHandle);
-	DbgPrint(L"Process resumed!");
+	CrashLog("[resume] pid=%u OK\n", id);
 	return true;
 }
 
@@ -567,10 +566,6 @@ bool HideWindowForProfile(HWND hWnd, int profileId, HWND activeWindow) {
 
 		int op = gProfiles[profileId].Operation;
 		if ((op == PROF_OP_HIDE || op == PROF_OP_PAUSE) && IsWindowVisible(hWnd)) {
-			// Minimize first so fullscreen/exclusive-mode games exit before we hide.
-			// Without this SW_HIDE on a fullscreen DX window often does nothing.
-			if (!IsIconic(hWnd)) ShowWindow(hWnd, SW_MINIMIZE);
-			Sleep(80);
 			ShowWindow(hWnd, SW_HIDE);
 			windowChanged = true;
 		}
@@ -686,16 +681,18 @@ void HandleProfile(int profileId, bool trigger) {
 		BOOL wasPaused = gProfiles[profileId].IsPaused;
 		CrashLog("[hotkey] Pause profile %d: wasPaused=%d pid=%u\n", profileId, wasPaused, pid);
 		if (wasPaused) {
-			ResumeProcess(pid);
+			bool rOk = ResumeProcess(pid);
+			CrashLog("[hotkey] Resume pid=%u ok=%d\n", pid, rOk);
 			Sleep(10);
 			RestoreWindowsForPofile(profileId);
-			gProfiles[profileId].IsPaused = FALSE;
+			gProfiles[profileId].IsPaused = FALSE; // clear regardless so next press tries again
 		} else {
 			gProfiles[profileId].ForegroundWindow = 0;
 			HideWindowsForPofile(profileId);
 			Sleep(10);
-			SuspendProcess(pid);
-			gProfiles[profileId].IsPaused = TRUE;
+			bool sOk = SuspendProcess(pid);
+			CrashLog("[hotkey] Suspend pid=%u ok=%d\n", pid, sOk);
+			gProfiles[profileId].IsPaused = sOk; // only mark paused if suspend actually worked
 		}
 		return;
 	}

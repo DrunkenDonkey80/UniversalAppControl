@@ -757,25 +757,29 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                         // Update slider labels (Brightness: XX / Contrast: XX%)
                         PeUpdateLabels(wnd);
 
-                        // --- Monitor preset (VCP 0xF0) ---
-                        // Always fill: add to gMonPresets if new, stamp B/C for a richer
-                        // label, rebuild combo, then select — regardless of checkbox state.
-                        if (captured.ProfileMode != PRESET_UNSET && captured.ProfileModeVcp > 0) {
-                            p->ProfileMode    = captured.ProfileMode;
-                            p->ProfileModeVcp = captured.ProfileModeVcp;
-                            // Rebuild combo and select the captured entry (VCP code:value)
+                        // --- Monitor preset ---
+                        // E2 reads the current picture-mode code; F0 is the writable
+                        // register on this hardware.  Store the captured E2 code
+                        // as an F0 entry so applying it later calls SetVCPFeature(F0,.).
+                        if (captured.ProfileMode != PRESET_UNSET) {
+                            int capturedCode = captured.ProfileMode; // E2 code = current mode
+                            // Add to gMonPresets as F0 write entry (no-op if already present)
+                            DisplayRecordProfile(0xF0, capturedCode);
+                            SaveMonPresets();
+                            // Store in display preset as F0
+                            p->ProfileMode    = capturedCode;
+                            p->ProfileModeVcp = 0xF0;
+                            // Rebuild combo and select the new entry
                             HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
                             BuildProfileCombo(prCb);
-                            // Pack (vcpCode << 8 | vcpValue) as item data key
-                            LRESULT wantKey = (LRESULT)((captured.ProfileModeVcp << 8) | (captured.ProfileMode & 0xFF));
-                            int cnt = ComboBox_GetCount(prCb);
-                            for (int _ci = 0; _ci < cnt; _ci++) {
+                            LRESULT wantKey = (LRESULT)((0xF0 << 8) | (capturedCode & 0xFF));
+                            int cnt2 = ComboBox_GetCount(prCb);
+                            for (int _ci = 0; _ci < cnt2; _ci++) {
                                 if (SendMessage(prCb, CB_GETITEMDATA, _ci, 0) == wantKey) {
                                     ComboBox_SetCurSel(prCb, _ci);
                                     break;
                                 }
                             }
-                            // Always check — user asked preset to be filled regardless
                             CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_CHECKED);
                         }
 

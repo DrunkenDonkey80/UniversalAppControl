@@ -34,6 +34,80 @@ static HMONITOR          gPrimaryHM  = NULL;
 static CRITICAL_SECTION  gMonLock;
 static bool              gMonInited  = false;
 
+// -----------------------------------------------------------------------
+//  DDC/CI timing + retry helpers   (see docs/DDCCONTROL_ANALYSIS.md)
+// -----------------------------------------------------------------------
+//  ddccontrol enforces 45 ms between ANY two DDC/CI operations and an
+//  additional 80 ms after every write.  Without these gaps a back-to-back
+//  write/read pair gets silently dropped by the monitor scaler firmware
+//  on many displays (Dell S3422DWG included).
+//  Win32 GetVCPFeatureAndVCPFeatureReply / SetVCPFeature do NOT enforce
+//  these gaps themselves — we have to do it.
+
+#define DDC_INTER_OP_MS  45  // min gap before any read/write
+#define DDC_POST_WRITE_MS 80 // additional gap after a write
+#define DDC_RETRIES       3  // ddccontrol retries reads 3x
+
+static ULONGLONG gLastDdcOpTick = 0;
+
+static void DdcciWaitInterOp(void) {
+    ULONGLONG now = GetTickCount64();
+    ULONGLONG elapsed = now - gLastDdcOpTick;
+    if (elapsed < DDC_INTER_OP_MS) Sleep((DWORD)(DDC_INTER_OP_MS - elapsed));
+}
+static void DdcciStampOp(void) { gLastDdcOpTick = GetTickCount64(); }
+
+// Retrying read.  Returns TRUE on success.  Logs all failures.
+static BOOL DdcciGetFeature(HANDLE h, BYTE vcp, DWORD* pType, DWORD* pCur, DWORD* pMax) {
+    for (int attempt = 1; attempt <= DDC_RETRIES; attempt++) {
+        DdcciWaitInterOp();
+        BOOL ok = FALSE;
+        DWORD vt=0, vc=0, vm=0;
+        __try { ok = GetVCPFeatureAndVCPFeatureReply(h, vcp, &vt, &vc, &vm); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+        DdcciStampOp();
+        if (ok) {
+            if (pType) *pType = vt;
+            if (pCur)  *pCur  = vc;
+            if (pMax)  *pMax  = vm;
+            if (attempt > 1) CrashLog("[ddc] Read VCP=0x%02X ok on attempt %d\n", vcp, attempt);
+            return TRUE;
+        }
+        CrashLog("[ddc] Read VCP=0x%02X attempt %d/%d FAILED\n", vcp, attempt, DDC_RETRIES);
+        Sleep(20); // small extra delay between retries
+    }
+    return FALSE;
+}
+
+// Write + 80 ms post-delay + readback verification.  Returns TRUE if the
+// monitor reports the new value matches what we wrote.  Logs mismatches.
+static BOOL DdcciSetFeatureVerified(HANDLE h, BYTE vcp, DWORD want) {
+    DdcciWaitInterOp();
+    BOOL setOk = FALSE;
+    __try { setOk = SetVCPFeature(h, vcp, want); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { setOk = FALSE; }
+    DdcciStampOp();
+    Sleep(DDC_POST_WRITE_MS); // ddccontrol's CONTROL_WRITE_DELAY
+    if (!setOk) {
+        CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX SetVCPFeature FAILED\n", vcp, want);
+        return FALSE;
+    }
+    // Read back to verify the monitor actually accepted it.
+    DWORD vt=0, got=0, vmax=0;
+    if (DdcciGetFeature(h, vcp, &vt, &got, &vmax)) {
+        if (got == want) {
+            CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX OK (verified)\n", vcp, want);
+            return TRUE;
+        }
+        CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX REJECTED by monitor (readback=0x%02lX)\n",
+                 vcp, want, got);
+        return FALSE;
+    }
+    // Couldn't read back — assume write went through.
+    CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX (no readback)\n", vcp, want);
+    return TRUE;
+}
+
 // Exported: supported VCP 0x14 codes for primary monitor (populated at init).
 BYTE gPrimaryVcp14Vals[MAX_VCP14_VALS] = {0};
 int  gPrimaryVcp14Count = 0;  // 0 = not probed, -1 = not supported
@@ -178,7 +252,92 @@ const wchar_t* GetVcpE2Label(BYTE code) {
     return buf;
 }
 
+// -----------------------------------------------------------------------
+//  vcpnames(...) parser — optional MCCS 3.0 extension
+//
+//  Some monitors emit a vcpnames(...) section in their capabilities string,
+//  giving human names for VCP value codes, e.g.:
+//     vcpnames(F0(0D=Standard 0E=Movie 0F="FPS Game" 10="RTS"))
+//  If present, we prefer those names over our hex fallback ("VCP F0:0D").
+// -----------------------------------------------------------------------
+#define MAX_VCP_NAMES 64
+typedef struct { BYTE reg, code; wchar_t name[40]; } VcpNameEntry;
+static VcpNameEntry gVcpNames[MAX_VCP_NAMES];
+static int          gVcpNameCount = 0;
+
+static void VcpNamesAdd(BYTE reg, BYTE code, const char* asciiName, size_t nameLen) {
+    if (gVcpNameCount >= MAX_VCP_NAMES) return;
+    VcpNameEntry* e = &gVcpNames[gVcpNameCount++];
+    e->reg = reg; e->code = code;
+    size_t cap = (sizeof(e->name)/sizeof(e->name[0])) - 1;
+    if (nameLen > cap) nameLen = cap;
+    for (size_t i = 0; i < nameLen; i++) e->name[i] = (wchar_t)(unsigned char)asciiName[i];
+    e->name[nameLen] = 0;
+}
+
+static const wchar_t* VcpNamesLookup(BYTE reg, BYTE code) {
+    for (int i = 0; i < gVcpNameCount; i++)
+        if (gVcpNames[i].reg == reg && gVcpNames[i].code == code) return gVcpNames[i].name;
+    return NULL;
+}
+
+// Parse a vcpnames(XX(YY="Name1" ZZ=Name2 ...))  section out of caps.
+// Quotes are optional; names ending at space or ) or next code.
+static void ParseVcpNames(const char* caps) {
+    gVcpNameCount = 0;
+    const char* p = strstr(caps, "vcpnames(");
+    if (!p) return;
+    p += 9; // past "vcpnames("
+    int paren = 1;
+    while (*p && paren > 0) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == ')') { paren--; p++; continue; }
+        // Read a 2-char hex — a VCP register
+        unsigned regVal = 0; int rd = 0;
+        while (rd < 2 && ((*p>='0'&&*p<='9')||(*p>='a'&&*p<='f')||(*p>='A'&&*p<='F'))) {
+            char c = *p++;
+            regVal = regVal*16 + ((c>='0'&&c<='9')?c-'0':(c>='a'&&c<='f')?c-'a'+10:c-'A'+10);
+            rd++;
+        }
+        if (rd != 2) { p++; continue; }
+        if (*p != '(') continue;
+        p++; paren++;
+        // Inside register-block: pairs CC=Name or CC="Quoted Name"
+        while (*p && *p != ')') {
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == ')') break;
+            unsigned codeVal = 0; int cd = 0;
+            while (cd < 2 && ((*p>='0'&&*p<='9')||(*p>='a'&&*p<='f')||(*p>='A'&&*p<='F'))) {
+                char c = *p++;
+                codeVal = codeVal*16 + ((c>='0'&&c<='9')?c-'0':(c>='a'&&c<='f')?c-'a'+10:c-'A'+10);
+                cd++;
+            }
+            if (cd != 2) { if (*p) p++; continue; }
+            if (*p != '=') { while (*p && *p!=' ' && *p!=')') p++; continue; }
+            p++; // past '='
+            const char* nameStart;
+            size_t nameLen;
+            if (*p == '"') {
+                p++; nameStart = p;
+                while (*p && *p != '"') p++;
+                nameLen = (size_t)(p - nameStart);
+                if (*p == '"') p++;
+            } else {
+                nameStart = p;
+                while (*p && *p != ' ' && *p != ')' && *p != '\t') p++;
+                nameLen = (size_t)(p - nameStart);
+            }
+            if (nameLen > 0) VcpNamesAdd((BYTE)regVal, (BYTE)codeVal, nameStart, nameLen);
+        }
+        if (*p == ')') { p++; paren--; }
+    }
+    CrashLog("[display] vcpnames parsed: %d entries\n", gVcpNameCount);
+}
+
 const wchar_t* FormatPresetLabel(BYTE vcpCode, BYTE vcpValue) {
+    // Prefer monitor-provided friendly name from vcpnames(...)
+    const wchar_t* friendly = VcpNamesLookup(vcpCode, vcpValue);
+    if (friendly && friendly[0]) return friendly;
     static wchar_t buf[24];
     swprintf_s(buf, 24, L"VCP %02X:%02X", vcpCode, vcpValue);
     return buf;
@@ -223,13 +382,14 @@ int DisplayReadCurrentPreset(void) {
     DWORD n = OpenPrimaryPhysicals(pm, MAX_PHYSICAL_PER_HMONITOR);
     if (n == 0) return PRESET_UNSET;
     HANDLE h = pm[0].hPhysicalMonitor;
-    static const BYTE kCandidates[] = { 0xE2, 0xDC, 0x14 };
+    // Prefer F0 (the writable register); fall back to E2/DC/14 for read.
+    static const BYTE kCandidates[] = { 0xF0, 0xE2, 0xDC, 0x14 };
     int result = PRESET_UNSET;
     for (int ci = 0; ci < (int)(sizeof(kCandidates)/sizeof(kCandidates[0])); ci++) {
-        DWORD vt=0, vc=0, vm=0; BOOL ok=FALSE;
-        __try { ok = GetVCPFeatureAndVCPFeatureReply(h, kCandidates[ci], &vt, &vc, &vm); }
-        __except(EXCEPTION_EXECUTE_HANDLER) { ok=FALSE; }
-        if (ok && vm > 1) { result = (int)vc; break; }
+        DWORD vt=0, vc=0, vm=0;
+        if (DdcciGetFeature(h, kCandidates[ci], &vt, &vc, &vm) && vm > 1) {
+            result = (int)vc; break;
+        }
     }
     DestroyPhysicalMonitors(n, pm);
     return result;
@@ -335,6 +495,8 @@ void DisplayInit(void) {
                 // VCP 0xF0 — Dell picture-mode WRITE register (confirmed writable via old scan)
                 PARSE_VCP_BLOCK('F','0', gPrimaryVcpF0Vals, gPrimaryVcpF0Count);
                 LeaveCriticalSection(&gMonLock);
+                // MCCS 3.0 vcpnames(...) for human-readable preset names
+                ParseVcpNames(capStr);
             }
             free(capStr);
         }
@@ -504,13 +666,11 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
     out->ProfileMode    = PRESET_UNSET;
     out->ProfileModeVcp = 0;
     {
-        DWORD vt=0, vc=0, vm=0; BOOL vok=FALSE;
-        __try { vok = GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &vt, &vc, &vm); }
-        __except(EXCEPTION_EXECUTE_HANDLER) { vok=FALSE; }
+        DWORD vt=0, vc=0, vm=0;
+        BOOL vok = DdcciGetFeature(h, 0xF0, &vt, &vc, &vm);
         CrashLog("[display] Capture F0: ok=%d cur=0x%02lX max=0x%02lX\n", vok, vc, vm);
         if (vok) {
-            // Store result even if cur=0 so caller can show "mode not capturable" message.
-            out->ProfileMode    = (int)vc;   // 0 = mode not in F0 domain
+            out->ProfileMode    = (int)vc;
             out->ProfileModeVcp = 0xF0;
             ok = true;
         }
@@ -567,32 +727,25 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
             // Auto-discover which register to use (same logic as capture)
             static const BYTE kApplyCands[] = { 0xE2, 0xDC, 0x14 };
             for (int ci = 0; ci < 3; ci++) {
-                DWORD vt2=0, vc2=0, vm2=0; BOOL ok2=FALSE;
-                __try { ok2 = GetVCPFeatureAndVCPFeatureReply(h, kApplyCands[ci], &vt2, &vc2, &vm2); }
-                __except(EXCEPTION_EXECUTE_HANDLER) { ok2=FALSE; }
+                DWORD vt2=0, vc2=0, vm2=0;
+                BOOL ok2 = DdcciGetFeature(h, kApplyCands[ci], &vt2, &vc2, &vm2);
                 if (ok2 && vm2 > 1) { vcp = kApplyCands[ci]; break; }
             }
         }
-        if (vcp == 0) goto skip_preset; // no usable register found
-        // ProfileMode=0 with ProfileModeVcp=0 = legacy uncaptured value; skip
+        if (vcp == 0) goto skip_preset;
         if (preset->ProfileMode == 0 && preset->ProfileModeVcp == 0) goto skip_preset;
         BYTE want = (BYTE)preset->ProfileMode;
         bool skip = !force && ((int)want == gLastApplied.pm);
         if (skip) {
             CrashLog("[display] PM VCP=0x%02X val=0x%02X unchanged, skip\n", vcp, want);
         } else {
-            DWORD fType=0, fCur=0, fMax=0; BOOL got=FALSE;
-            __try { got = GetVCPFeatureAndVCPFeatureReply(h, vcp, &fType, &fCur, &fMax); }
-            __except(EXCEPTION_EXECUTE_HANDLER) { }
+            DWORD fType=0, fCur=0, fMax=0;
+            BOOL got = DdcciGetFeature(h, vcp, &fType, &fCur, &fMax);
             if (got) {
                 if (firstTouch) vcpE2Orig = fCur;
                 if (force || fCur != want) {
-                    BOOL setOk=FALSE;
-                    __try { setOk = SetVCPFeature(h, vcp, want); anySet = true; }
-                    __except(EXCEPTION_EXECUTE_HANDLER) { }
+                    if (DdcciSetFeatureVerified(h, vcp, want)) anySet = true;
                     gLastApplied.pm = (int)want;
-                    CrashLog("[display] SetVCP 0x%02X val=0x%02X -> ok=%d\n", vcp, want, setOk);
-                    Sleep(80);
                 } else {
                     gLastApplied.pm = (int)want;
                 }
@@ -656,17 +809,13 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
         if (skip) {
             CrashLog("[display] CT=VCP%02X unchanged, skip\n", want14);
         } else if (want14 != 0xFF) {
-            DWORD vcpType=0, vcpCur=0, vcpMax=0; BOOL got=FALSE;
-            __try { got = GetVCPFeatureAndVCPFeatureReply(h, 0x14, &vcpType, &vcpCur, &vcpMax); }
-            __except(EXCEPTION_EXECUTE_HANDLER) { }
+            DWORD vcpType=0, vcpCur=0, vcpMax=0;
+            BOOL got = DdcciGetFeature(h, 0x14, &vcpType, &vcpCur, &vcpMax);
             if (got) {
                 if (firstTouch && vcpCur) vcp14Orig = vcpCur;
                 if (force || want14 != (BYTE)vcpCur) {
-                    BOOL setOk=FALSE;
-                    __try { setOk = SetVCPFeature(h, 0x14, want14); anySet = true; }
-                    __except(EXCEPTION_EXECUTE_HANDLER) { }
+                    if (DdcciSetFeatureVerified(h, 0x14, want14)) anySet = true;
                     gLastApplied.ct = (int)want14;
-                    CrashLog("[display] SetVCP14 0x%02X -> %d\n", want14, setOk);
                 } else {
                     gLastApplied.ct = (int)want14;
                 }

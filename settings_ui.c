@@ -757,30 +757,36 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                         // Update slider labels (Brightness: XX / Contrast: XX%)
                         PeUpdateLabels(wnd);
 
-                        // --- Monitor preset ---
-                        // E2 reads the current picture-mode code; F0 is the writable
-                        // register on this hardware.  Store the captured E2 code
-                        // as an F0 entry so applying it later calls SetVCPFeature(F0,.).
-                        if (captured.ProfileMode != PRESET_UNSET) {
-                            int capturedCode = captured.ProfileMode; // E2 code = current mode
-                            // Add to gMonPresets as F0 write entry (no-op if already present)
-                            DisplayRecordProfile(0xF0, capturedCode);
-                            SaveMonPresets();
-                            // Store in display preset as F0
-                            p->ProfileMode    = capturedCode;
-                            p->ProfileModeVcp = 0xF0;
-                            // Rebuild combo and select the new entry
-                            HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
-                            BuildProfileCombo(prCb);
-                            LRESULT wantKey = (LRESULT)((0xF0 << 8) | (capturedCode & 0xFF));
-                            int cnt2 = ComboBox_GetCount(prCb);
-                            for (int _ci = 0; _ci < cnt2; _ci++) {
-                                if (SendMessage(prCb, CB_GETITEMDATA, _ci, 0) == wantKey) {
-                                    ComboBox_SetCurSel(prCb, _ci);
-                                    break;
+                        // --- Monitor preset via F0 ---
+                        // F0 is the write register. cur=0 means the monitor is in a mode
+                        // that F0 doesn't control (e.g. Warm via OSD) — tell the user.
+                        if (captured.ProfileModeVcp == 0xF0) {
+                            if (captured.ProfileMode == 0) {
+                                MessageBoxW(wnd,
+                                    L"Current monitor mode cannot be captured."
+                                    L"\n\nThe monitor is in a mode that is not accessible via"
+                                    L" DDC/CI (F0 register reads 0x00)."
+                                    L"\n\nSwitch to a different mode via the monitor OSD"
+                                    L" (e.g. Standard, Movie, FPS, RTS) and try again.",
+                                    APPNAME L" - Capture", MB_OK | MB_ICONINFORMATION);
+                            } else {
+                                int capturedCode = captured.ProfileMode;
+                                DisplayRecordProfile(0xF0, capturedCode);
+                                SaveMonPresets();
+                                p->ProfileMode    = capturedCode;
+                                p->ProfileModeVcp = 0xF0;
+                                HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
+                                BuildProfileCombo(prCb);
+                                LRESULT wantKey = (LRESULT)((0xF0 << 8) | (capturedCode & 0xFF));
+                                int cnt2 = ComboBox_GetCount(prCb);
+                                for (int _ci = 0; _ci < cnt2; _ci++) {
+                                    if (SendMessage(prCb, CB_GETITEMDATA, _ci, 0) == wantKey) {
+                                        ComboBox_SetCurSel(prCb, _ci);
+                                        break;
+                                    }
                                 }
+                                CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_CHECKED);
                             }
-                            CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_CHECKED);
                         }
 
                         SaveConfig();

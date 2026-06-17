@@ -496,29 +496,23 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
         ok = true;
     }
 
-    // Picture-mode preset: probe common VCP registers in priority order.
-    // First non-zero hit wins — this auto-discovers the right register for any monitor:
-    //   0xE2 = Dell S-series / AW-series picture mode
-    //   0xDC = MCCS Display Mode (LG, Samsung, others)
-    //   0x14 = MCCS Color Preset / temperature (most monitors)
-    // Storing both the register (ProfileModeVcp) and value (ProfileMode) means
-    // the same value is written back to the correct register on apply.
+    // Picture-mode preset: read VCP 0xF0 directly.
+    // F0 is the WRITE register on Dell monitors (confirmed by old scan).
+    // When cur=0 the monitor is in a mode that F0 doesn't control (e.g. Warm
+    // set via OSD) — return cur=0 so the caller can tell the user it can't be
+    // captured. When cur>0 it IS a capturable F0 mode.
     out->ProfileMode    = PRESET_UNSET;
     out->ProfileModeVcp = 0;
     {
-        static const BYTE kCandidates[] = { 0xE2, 0xDC, 0x14 };
-        for (int ci = 0; ci < (int)(sizeof(kCandidates)/sizeof(kCandidates[0])); ci++) {
-            BYTE vcp = kCandidates[ci];
-            DWORD vt=0, vc=0, vm=0; BOOL vok=FALSE;
-            __try { vok = GetVCPFeatureAndVCPFeatureReply(h, vcp, &vt, &vc, &vm); }
-            __except(EXCEPTION_EXECUTE_HANDLER) { vok=FALSE; }
-            if (vok && vm > 1) { // max>1 means it's a multi-value selector, not a boolean
-                out->ProfileMode    = (int)vc;
-                out->ProfileModeVcp = (int)vcp;
-                CrashLog("[display] Capture: VCP 0x%02X cur=0x%02lX max=0x%02lX\n", vcp, vc, vm);
-                ok = true;
-                break;
-            }
+        DWORD vt=0, vc=0, vm=0; BOOL vok=FALSE;
+        __try { vok = GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &vt, &vc, &vm); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { vok=FALSE; }
+        CrashLog("[display] Capture F0: ok=%d cur=0x%02lX max=0x%02lX\n", vok, vc, vm);
+        if (vok) {
+            // Store result even if cur=0 so caller can show "mode not capturable" message.
+            out->ProfileMode    = (int)vc;   // 0 = mode not in F0 domain
+            out->ProfileModeVcp = 0xF0;
+            ok = true;
         }
     }
 

@@ -647,9 +647,15 @@ bool RestoreWindowsForPofile(int profileId) {
 	}
 	if (toFocus) {
 		if (IsIconic(toFocus)) ShowWindow(toFocus, SW_RESTORE);
+		// SetForegroundWindow from a non-foreground thread is normally ignored.
+		// AttachThreadInput lets us steal focus reliably from the worker thread.
+		DWORD targetTid  = GetWindowThreadProcessId(toFocus, NULL);
+		DWORD currentTid = GetCurrentThreadId();
+		BOOL attached = (targetTid && targetTid != currentTid)
+		    ? AttachThreadInput(currentTid, targetTid, TRUE) : FALSE;
 		SetForegroundWindow(toFocus);
-		SetActiveWindow(toFocus);
-		SetFocus(toFocus);
+		BringWindowToTop(toFocus);
+		if (attached) AttachThreadInput(currentTid, targetTid, FALSE);
 	}
 	gProfiles[profileId].NumHiddenWindows = 0;
 	return windowChanged;

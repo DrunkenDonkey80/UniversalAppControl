@@ -76,11 +76,12 @@ DWORD WINAPI WorkerThreadProc(LPVOID param) {
                 if (pi < 0) pi = FindPresetByName(gDefaultPresetName);
                 if (pi < 0) { CrashLog("[worker] no preset, abort\n"); break; }
 
+                if (force) DisplayResetLastApplied(); // bypass skip-if-unchanged cache
                 CrashLog("[worker] calling DisplayApplyPreset preset[%d]='%ls' B=%d C=%d CT=%d hwnd=%p\n",
                          pi, gPresets[pi].Name,
                          gPresets[pi].Brightness, gPresets[pi].Contrast, gPresets[pi].ColorTemp,
                          (void*)d.hwnd);
-                DisplayApplyPreset(d.hwnd, &gPresets[pi]);
+                DisplayApplyPreset(d.hwnd, &gPresets[pi], force);
                 CrashLog("[worker] DisplayApplyPreset returned\n");
                 break;
             }

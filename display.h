@@ -1,36 +1,46 @@
 #pragma once
 #include <Windows.h>
 #include <stdbool.h>
-#include "Main.h"    // DISPLAY_PRESET, PRESET_UNSET, MAX_NAME
+#include "Main.h"
 
-// Maximum physical monitors behind a single HMONITOR (usually 1).
 #define MAX_PHYSICAL_PER_HMONITOR 8
+#define MAX_VCP14_VALS            16
+
+// -----------------------------------------------------------------------
+//  Supported VCP 0x14 color-preset codes for the primary monitor.
+//  Populated by DisplayInit(); read by the settings UI to build the
+//  color-temperature dropdown.
+//  Count == 0: not yet probed.  Count == -1: VCP 0x14 not supported.
+// -----------------------------------------------------------------------
+extern BYTE gPrimaryVcp14Vals[MAX_VCP14_VALS];
+extern int  gPrimaryVcp14Count;
+
+// Human-readable label for a VCP 0x14 code (e.g. 0x05 -> L"6500K").
+const wchar_t* GetVcp14Label(BYTE code);
 
 // -----------------------------------------------------------------------
 //  Public API
 // -----------------------------------------------------------------------
 
-// One-time init: enumerate all attached monitors and probe DDC/CI capability.
-// Call before starting the worker thread (or from the worker thread).
 void DisplayInit(void);
-
-// Re-probe capabilities after WM_DISPLAYCHANGE.
 void DisplayRefresh(void);
 
-// Fill names[][128] with the description strings of monitors that don't
-// support DDC/CI brightness control.  Returns count filled.
-int DisplayListUnsupported(wchar_t names[][128], int maxOut);
+// Reset last-applied tracking so the next Apply always sends to hardware.
+// Call this before a force-apply (Apply button) to ensure values are sent
+// even if the preset hasn't changed since the last foreground switch.
+void DisplayResetLastApplied(void);
 
-// Read current brightness/contrast/colortemp from the physical monitor that
-// the window hwnd lives on and fill *out.  hwnd=NULL -> primary monitor.
-// Returns true if at least one value was read.
+int  DisplayListUnsupported(wchar_t names[][128], int maxOut);
+
+// Capture current brightness/contrast/colortemp from the PRIMARY monitor.
+// hwnd is ignored (kept for API compatibility).
+// ColorTemp is returned as a raw VCP 0x14 code (1-12), not Kelvin.
 bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out);
 
-// Apply preset to the physical monitor the window hwnd lives on.
-// Fields set to PRESET_UNSET are skipped.  Snapshots originals on first touch.
-// hwnd=NULL -> primary monitor.  Returns true if any attribute was changed.
-bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset);
+// Apply preset to the PRIMARY monitor.
+// force=true  : ignore last-applied cache and always send (Apply button).
+// force=false : skip unchanged values (foreground poll path).
+// hwnd is ignored.
+bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force);
 
-// Restore every monitor we have modified to the values snapshotted at first
-// touch.  Call once on application exit.
 void DisplayRestoreAll(void);

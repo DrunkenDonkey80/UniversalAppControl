@@ -395,24 +395,36 @@ static void ApplyFieldsToSelection(HWND wnd) {
 static int   gPeSelected = -1;   // selected preset index in the editor
 static bool  gPeDone = false;    // set by WM_DESTROY to unblock ShowPresetEditor
 
-// Color temperature combo entries (value == Kelvin, or -1 for "don't change")
-typedef struct { const wchar_t* label; int kelvin; } CtEntry;
-static const CtEntry kCtEntries[] = {
-    { L"(don't change)",             PRESET_UNSET     },
-    // Monitor-native modes (sent as VCP 0x14 directly, no Kelvin conversion)
-    { L"User Color (OSD warm)",      CT_USER_COLOR    },  // VCP 0x0C
-    { L"Custom Color (OSD RGB)",     CT_CUSTOM_COLOR  },  // VCP 0x0B
-    // Standard MCCS Kelvin presets (mapped to closest supported VCP code)
-    { L"4000K (warm)",               4000  },
-    { L"5000K",                      5000  },
-    { L"6500K (daylight)",           6500  },
-    { L"7500K",                      7500  },
-    { L"8200K",                      8200  },
-    { L"9300K (cool)",               9300  },
-    { L"10000K",                     10000 },
-    { L"11500K (cold)",              11500 },
+// Display order for VCP 0x14 codes in the CT dropdown: warmest first.
+// Only codes present in gPrimaryVcp14Vals are added to the combo.
+static const BYTE kVcp14DisplayOrder[] = {
+    0x0C,  // User Color (warm custom)
+    0x0B,  // Custom Color
+    0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,  // 4000K..11500K
+    0x01, 0x02,   // sRGB, Native
 };
-#define CT_ENTRIES_COUNT ((int)(sizeof(kCtEntries)/sizeof(kCtEntries[0])))
+
+// Populate the CT combo from gPrimaryVcp14Vals.
+// Item 0 is always "(don't change)" with data PRESET_UNSET.
+// Remaining items use CB_SETITEMDATA to store the VCP code (1-12).
+static void BuildCtCombo(HWND cb) {
+    ComboBox_ResetContent(cb);
+    int idx = ComboBox_AddString(cb, L"(don't change)");
+    SendMessage(cb, CB_SETITEMDATA, idx, (LPARAM)PRESET_UNSET);
+
+    if (gPrimaryVcp14Count <= 0) return;  // monitor not detected yet
+
+    for (int oi = 0; oi < (int)(sizeof(kVcp14DisplayOrder)); oi++) {
+        BYTE code = kVcp14DisplayOrder[oi];
+        // Check if this code is in the monitor's list
+        bool supported = false;
+        for (int vi = 0; vi < gPrimaryVcp14Count; vi++)
+            if (gPrimaryVcp14Vals[vi] == code) { supported = true; break; }
+        if (!supported) continue;
+        idx = ComboBox_AddString(cb, GetVcp14Label(code));
+        SendMessage(cb, CB_SETITEMDATA, idx, (LPARAM)(INT_PTR)(int)code);
+    }
+}
 
 // Update the checkbox label text to show the current slider value.
 static void PeUpdateLabels(HWND wnd) {
@@ -466,15 +478,22 @@ static void PeLoadFields(HWND wnd, int idx) {
         SendDlgItemMessage(wnd, IDC_PE_CONT, TBM_SETPOS, TRUE, 50);
         CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_UNCHECKED);
     }
-    int ctSel = 0;
-    if (p->ColorTemp != PRESET_UNSET) {
-        for (int i = 0; i < CT_ENTRIES_COUNT; i++) {
-            if (kCtEntries[i].kelvin == p->ColorTemp) { ctSel = i; break; }
+    // Find the combo item whose CB_GETITEMDATA matches p->ColorTemp.
+    {
+        HWND ctCb = GetDlgItem(wnd, IDC_PE_CTEMP);
+        int ctSel = 0;  // default: index 0 = "(don't change)"
+        if (p->ColorTemp != PRESET_UNSET) {
+            int cnt = ComboBox_GetCount(ctCb);
+            for (int i = 1; i < cnt; i++) {
+                LRESULT data = SendMessage(ctCb, CB_GETITEMDATA, (WPARAM)i, 0);
+                if ((int)data == p->ColorTemp) { ctSel = i; break; }
+            }
         }
+        ComboBox_SetCurSel(ctCb, ctSel);
+        CheckDlgButton(wnd, IDC_PE_CTEMP_CHK,
+                       (p->ColorTemp != PRESET_UNSET && ctSel > 0)
+                           ? BST_CHECKED : BST_UNCHECKED);
     }
-    ComboBox_SetCurSel(GetDlgItem(wnd, IDC_PE_CTEMP), ctSel);
-    CheckDlgButton(wnd, IDC_PE_CTEMP_CHK,
-                   p->ColorTemp != PRESET_UNSET ? BST_CHECKED : BST_UNCHECKED);
     PeUpdateLabels(wnd);
 }
 
@@ -493,11 +512,14 @@ static void PeSaveFields(HWND wnd) {
         p->Contrast = PRESET_UNSET;
     }
     if (IsDlgButtonChecked(wnd, IDC_PE_CTEMP_CHK) == BST_CHECKED) {
-        int sel = ComboBox_GetCurSel(GetDlgItem(wnd, IDC_PE_CTEMP));
-        if (sel > 0 && sel < CT_ENTRIES_COUNT)
-            p->ColorTemp = kCtEntries[sel].kelvin;
-        else
+        HWND ctCb = GetDlgItem(wnd, IDC_PE_CTEMP);
+        int sel = ComboBox_GetCurSel(ctCb);
+        if (sel > 0) {
+            LRESULT data = SendMessage(ctCb, CB_GETITEMDATA, (WPARAM)sel, 0);
+            p->ColorTemp = (data != CB_ERR) ? (int)data : PRESET_UNSET;
+        } else {
             p->ColorTemp = PRESET_UNSET;
+        }
     } else {
         p->ColorTemp = PRESET_UNSET;
     }
@@ -579,8 +601,7 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 BS_AUTOCHECKBOX, ex, ey+2, 90, 22, IDC_PE_CTEMP_CHK);
             HWND ctCombo = MakeChild(wnd, L"COMBOBOX", L"",
                 CBS_DROPDOWNLIST|WS_VSCROLL, ex+94, ey, ew-94, 200, IDC_PE_CTEMP);
-            for (int i = 0; i < CT_ENTRIES_COUNT; i++)
-                ComboBox_AddString(ctCombo, kCtEntries[i].label);
+            BuildCtCombo(ctCombo);
             ComboBox_SetCurSel(ctCombo, 0);
             ey += 32;
 

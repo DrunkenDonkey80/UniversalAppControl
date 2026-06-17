@@ -30,11 +30,12 @@ extern _HungWindowFromGhostWindow HungWindowFromGhostWindow;
 #define MAX_PROCESSES_PER_PROFILE 40
 #define MAX_NAME 128
 #define MAX_PRESETS 16
-#define PRESET_UNSET     (-1)   // sentinel: "leave this attribute unchanged"
-// Special ColorTemp sentinels for VCP 0x14 modes that have no Kelvin equivalent.
-// Stored in DISPLAY_PRESET.ColorTemp; recognised by DisplayApplyPreset.
-#define CT_USER_COLOR   (-2)   // VCP 0x14 = 0x0C  (User Color / OSD custom warm)
-#define CT_CUSTOM_COLOR (-3)   // VCP 0x14 = 0x0B  (Custom Color / manual RGB gains)
+#define PRESET_UNSET  (-1)   // sentinel: "leave this attribute unchanged"
+// DISPLAY_PRESET.ColorTemp stores:
+//   PRESET_UNSET (-1)  : don't change color temperature
+//   1-255             : VCP 0x14 code sent directly to the monitor
+//                       (e.g. 0x05=6500K, 0x08=9300K, 0x0C=User Warm)
+//   >= 256            : legacy Kelvin — mapped to nearest supported VCP code
 
 // ---------------------------------------------------------------------------
 //  Display preset: a named set of monitor settings applied automatically

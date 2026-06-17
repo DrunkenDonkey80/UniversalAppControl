@@ -1055,6 +1055,17 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 				sFgPollMs = tNow;
 				HWND fg = GetForegroundWindow();
 				if (fg != sFgLast) {
+					// Only act when the window is on the PRIMARY monitor.
+					// If it's on a secondary display, leave the last preset active.
+					if (fg) {
+						HMONITOR hfg = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+						MONITORINFO mfi = { sizeof(mfi) };
+						if (hfg && GetMonitorInfo(hfg, &mfi) &&
+						    !(mfi.dwFlags & MONITORINFOF_PRIMARY)) {
+							// Secondary monitor — skip, don't update sFgLast
+							goto fg_poll_done;
+						}
+					}
 					sFgLast = fg;
 					// Find which preset applies: scan profiles by exe name.
 					wchar_t presetName[MAX_NAME] = {0};
@@ -1095,6 +1106,7 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 					}
 				}
 			}
+			fg_poll_done:;
 		}
 
 		// MsgWaitForMultipleObjects instead of Sleep(5): the thread wakes immediately

@@ -171,7 +171,7 @@ static DISPLAY_PRESET gTtPreset;  // shared with test threads
 static DWORD WINAPI BgThreadNoComProc(LPVOID p) {
     (void)p;
     MdLog("[BgThread-NoCOM] start, calling DisplayApplyPreset...\n");
-    BOOL r = DisplayApplyPreset(NULL, &gTtPreset);
+    BOOL r = DisplayApplyPreset(NULL, &gTtPreset, true);
     MdLog("[BgThread-NoCOM] returned %d\n", r);
     gTtResult = r; gTtDone = TRUE;
     return 0;
@@ -181,7 +181,7 @@ static DWORD WINAPI BgThreadWithComProc(LPVOID p) {
     (void)p;
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     MdLog("[BgThread-WithCOM] CoInitializeEx hr=0x%08X\n", (unsigned)hr);
-    BOOL r = DisplayApplyPreset(NULL, &gTtPreset);
+    BOOL r = DisplayApplyPreset(NULL, &gTtPreset, true);
     MdLog("[BgThread-WithCOM] returned %d\n", r);
     CoUninitialize();
     gTtResult = r; gTtDone = TRUE;
@@ -417,7 +417,7 @@ int RunMonitorDebug(void) {
     // Test 1: main thread, apply +1 offset
     MdLog("\nTest1: MAIN THREAD  set B=%d C=%d ...\n",
           gTtPreset.Brightness, gTtPreset.Contrast);
-    bool r1 = DisplayApplyPreset(NULL, &gTtPreset);
+    bool r1 = DisplayApplyPreset(NULL, &gTtPreset, true);
     MdLog("Test1: %s  (expected OK - Set must be called)\n", r1 ? "OK (Set called)" : "no-op UNEXPECTED");
 
     // Test 2: background thread, NO COM -- restore original values (B-1, C-1)

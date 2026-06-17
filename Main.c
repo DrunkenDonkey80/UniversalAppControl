@@ -39,6 +39,7 @@ BOOL           gDisplayControlEnabled = FALSE;
 wchar_t        gDefaultPresetName[MAX_NAME] = L"Default";
 
 DesiredDisplay gDesiredDisplay;   // guarded by gHotkeyLock
+HWND           gScanNotifyHwnd = NULL;
 
 typedef struct _HotkeyInfo
 {
@@ -933,6 +934,7 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	InitializeCriticalSection(&gHotkeyLock);
 	WorkerInit();
 	DisplayInit();   // must be called before worker thread starts
+	LoadMonPresets();// restore previously-scanned preset names/B/C
 	CrashLog("[main] DisplayInit done\n");
 	workerThread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, NULL);
 	if (workerThread == NULL) {

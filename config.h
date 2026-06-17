@@ -14,3 +14,7 @@ int FindPresetByName(const wchar_t* name);
 
 // Find or create a preset by name; returns index or -1 if table full.
 int GetOrCreatePreset(const wchar_t* name);
+
+// Persist / restore the scanned VCP 0xF0 preset table.
+void SaveMonPresets(void);
+void LoadMonPresets(void);

@@ -1,4 +1,5 @@
 #include "config.h"
+#include "display.h"
 #include "keys.h"
 #include <stdio.h>
 #include <string.h>
@@ -107,6 +108,45 @@ int GetOrCreatePreset(const wchar_t* name) {
 
 static void WriteBool(const wchar_t* section, const wchar_t* key, BOOL v) {
     WritePrivateProfileStringW(section, key, v ? L"true" : L"false", GetConfigPath());
+}
+
+// Save the scanned preset table so we don't need to re-scan every session.
+void SaveMonPresets(void) {
+    const wchar_t* path = GetConfigPath();
+    // Write each scanned entry under [MonitorPresets]
+    // Key format: "XX" where XX = hex VCP code; value = "Name|B|C"
+    for (int i = 0; i < gMonPresetCount; i++) {
+        if (!gMonPresets[i].vcpCode) continue;
+        wchar_t key[8], val[128];
+        swprintf_s(key, _countof(key), L"%02X", gMonPresets[i].vcpCode);
+        swprintf_s(val, _countof(val), L"%s|%d|%d",
+                   gMonPresets[i].name,
+                   gMonPresets[i].brightness,
+                   gMonPresets[i].contrast);
+        WritePrivateProfileStringW(L"MonitorPresets", key, val, path);
+    }
+}
+
+// Load previously-scanned preset table into gMonPresets[].
+void LoadMonPresets(void) {
+    const wchar_t* path = GetConfigPath();
+    for (int i = 0; i < gMonPresetCount; i++) {
+        if (!gMonPresets[i].vcpCode) continue;
+        wchar_t key[8], val[256];
+        swprintf_s(key, _countof(key), L"%02X", gMonPresets[i].vcpCode);
+        if (GetPrivateProfileStringW(L"MonitorPresets", key, L"",
+                                     val, _countof(val), path) > 0 && val[0]) {
+            // Parse "Name|B|C"
+            wchar_t* ctx = NULL;
+            wchar_t* name = wcstok_s(val, L"|", &ctx);
+            wchar_t* bStr = wcstok_s(NULL, L"|", &ctx);
+            wchar_t* cStr = wcstok_s(NULL, L"|", &ctx);
+            if (name && name[0]) wcscpy_s(gMonPresets[i].name, 64, name);
+            if (bStr) { int b = _wtoi(bStr); gMonPresets[i].brightness = b; }
+            if (cStr) { int c = _wtoi(cStr); gMonPresets[i].contrast   = c; }
+            gMonPresets[i].scanned = (bStr != NULL);
+        }
+    }
 }
 
 void SaveConfig(void) {

@@ -46,4 +46,6 @@
 #define IDC_PE_CONT_CHK    3218  // "set contrast" checkbox
 #define IDC_PE_CTEMP_CHK   3219  // "set color temp" checkbox
 #define IDC_PE_APPLY       3220  // "Apply to monitor" test button
-#define IDC_PE_PROFILE_LBL 3221  // read-only label showing current VCP 0xF0 preset name
+#define IDC_PE_PROFILE_LBL 3221  // (unused - replaced by combo)
+#define IDC_PE_PROFILE     3222  // combobox: monitor preset mode (VCP 0xF0)
+#define IDC_PE_SCAN        3223  // "Scan" button: probe all F0 codes

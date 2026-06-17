@@ -395,6 +395,33 @@ static void ApplyFieldsToSelection(HWND wnd) {
 static int   gPeSelected = -1;   // selected preset index in the editor
 static bool  gPeDone = false;    // set by WM_DESTROY to unblock ShowPresetEditor
 
+// Build the Monitor Preset combo from gMonPresets[].
+// Item data = VCP code (PRESET_UNSET = -1 for "(none)").
+static void BuildProfileCombo(HWND cb) {
+    int prev = ComboBox_GetCurSel(cb);
+    LRESULT prevCode = (prev >= 0) ?
+        SendMessage(cb, CB_GETITEMDATA, prev, 0) : CB_ERR;
+
+    ComboBox_ResetContent(cb);
+    int idx = ComboBox_AddString(cb, L"(none)");
+    SendMessage(cb, CB_SETITEMDATA, idx, (LPARAM)PRESET_UNSET);
+
+    int newSel = 0;
+    for (int i = 0; i < gMonPresetCount; i++) {
+        wchar_t label[128];
+        MonPresetInfo* p = &gMonPresets[i];
+        if (p->scanned && p->brightness != PRESET_UNSET && p->contrast != PRESET_UNSET)
+            swprintf_s(label, _countof(label), L"%s  (B:%d C:%d)",
+                       p->name, p->brightness, p->contrast);
+        else
+            swprintf_s(label, _countof(label), L"%s", p->name);
+        idx = ComboBox_AddString(cb, label);
+        SendMessage(cb, CB_SETITEMDATA, idx, (LPARAM)(INT_PTR)(int)p->vcpCode);
+        if ((LRESULT)(INT_PTR)(int)p->vcpCode == prevCode) newSel = idx;
+    }
+    ComboBox_SetCurSel(cb, newSel);
+}
+
 // Display order for VCP 0x14 codes in the CT dropdown: warmest first.
 // Only codes present in gPrimaryVcp14Vals are added to the combo.
 static const BYTE kVcp14DisplayOrder[] = {
@@ -494,14 +521,15 @@ static void PeLoadFields(HWND wnd, int idx) {
                        (p->ColorTemp != PRESET_UNSET && ctSel > 0)
                            ? BST_CHECKED : BST_UNCHECKED);
     }
-    // Monitor Preset label
-    if (p->ProfileMode != PRESET_UNSET) {
-        wchar_t pmBuf[64];
-        swprintf_s(pmBuf, _countof(pmBuf), L"%s (0x%02X)",
-                   GetVcpF0Label((BYTE)p->ProfileMode), (BYTE)p->ProfileMode);
-        SetDlgItemTextW(wnd, IDC_PE_PROFILE_LBL, pmBuf);
-    } else {
-        SetDlgItemTextW(wnd, IDC_PE_PROFILE_LBL, L"(not captured)");
+    // Monitor Preset combo
+    {
+        HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
+        int cnt = ComboBox_GetCount(prCb); int sel = 0;
+        for (int i = 0; i < cnt; i++) {
+            LRESULT data = SendMessage(prCb, CB_GETITEMDATA, i, 0);
+            if ((int)data == p->ProfileMode) { sel = i; break; }
+        }
+        ComboBox_SetCurSel(prCb, sel);
     }
     PeUpdateLabels(wnd);
 }
@@ -531,6 +559,17 @@ static void PeSaveFields(HWND wnd) {
         }
     } else {
         p->ColorTemp = PRESET_UNSET;
+    }
+    // Profile mode from combo
+    {
+        HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
+        int sel = ComboBox_GetCurSel(prCb);
+        if (sel > 0) {
+            LRESULT data = SendMessage(prCb, CB_GETITEMDATA, sel, 0);
+            p->ProfileMode = (data != CB_ERR) ? (int)data : PRESET_UNSET;
+        } else {
+            p->ProfileMode = PRESET_UNSET;
+        }
     }
 }
 
@@ -614,11 +653,15 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             ComboBox_SetCurSel(ctCombo, 0);
             ey += 32;
 
-            // Monitor Preset (VCP 0xF0): label + read-only display
+            // Monitor Preset (VCP 0xF0): label + combo + Scan button
             MakeChild(wnd, L"STATIC", L"Monitor preset:",
-                SS_LEFT, ex, ey+3, 90, 18, 0);
-            MakeChild(wnd, L"STATIC", L"(use Capture)",
-                SS_LEFT|SS_SUNKEN, ex+94, ey, ew-94, 24, IDC_PE_PROFILE_LBL);
+                SS_LEFT, ex, ey+5, 90, 18, 0);
+            {
+                HWND prCb = MakeChild(wnd, L"COMBOBOX", L"",
+                    CBS_DROPDOWNLIST|WS_VSCROLL, ex+94, ey, ew-94-70, 200, IDC_PE_PROFILE);
+                BuildProfileCombo(prCb);
+            }
+            MakeBtn(wnd, L"Scan", ex+ew-66, ey, 66, 26, IDC_PE_SCAN);
             ey += 30;
 
             // Capture full-width
@@ -757,6 +800,15 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                     CrashLog("[ui] job pushed ok\n");
                 }
             }
+            if (id == IDC_PE_SCAN && code == BN_CLICKED) {
+                if (!gScanInProgress) {
+                    EnableWindow(GetDlgItem(wnd, IDC_PE_SCAN), FALSE);
+                    SetDlgItemTextW(wnd, IDC_PE_SCAN, L"Scanning...");
+                    gScanNotifyHwnd = wnd;
+                    Job js = { JOB_SCAN_PRESETS, 0 };
+                    JobQueuePush(js);
+                }
+            }
             if (id == IDC_PE_OK && code == BN_CLICKED) {
                 PeSaveFields(wnd);
                 SaveConfig();
@@ -765,6 +817,14 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             if (id == IDC_PE_CANCEL && code == BN_CLICKED) {
                 DestroyWindow(wnd);
             }
+            return 0;
+        }
+        case WM_APP + 42: {
+            // Scan complete: rebuild profile combo with new names/B/C, re-enable button
+            SaveMonPresets();
+            BuildProfileCombo(GetDlgItem(wnd, IDC_PE_PROFILE));
+            SetDlgItemTextW(wnd, IDC_PE_SCAN, L"Scan");
+            EnableWindow(GetDlgItem(wnd, IDC_PE_SCAN), TRUE);
             return 0;
         }
         case WM_HSCROLL: {

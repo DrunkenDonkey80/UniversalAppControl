@@ -19,9 +19,28 @@ extern int  gPrimaryVcp14Count;
 extern BYTE gPrimaryVcpF0Vals[MAX_VCP14_VALS];
 extern int  gPrimaryVcpF0Count;
 
+// Probed preset table (VCP 0xF0).  Populated by DisplayScanPresets().
+// Until scanned, names come from GetVcpF0Label(); B/C are PRESET_UNSET.
+typedef struct {
+    BYTE    vcpCode;
+    wchar_t name[64];   // display label (best-guess or confirmed by scan)
+    int     brightness; // 0-100 read after switching, or PRESET_UNSET
+    int     contrast;   // 0-100 read after switching, or PRESET_UNSET
+    bool    scanned;    // true once B/C have been probed
+} MonPresetInfo;
+
+extern MonPresetInfo gMonPresets[MAX_VCP14_VALS];
+extern int           gMonPresetCount; // number of valid entries in gMonPresets[]
+extern volatile bool gScanInProgress; // true while JOB_SCAN_PRESETS is running
+
 // Human-readable labels.
 const wchar_t* GetVcp14Label(BYTE code);
-const wchar_t* GetVcpF0Label(BYTE code);
+const wchar_t* GetVcpF0Label(BYTE code); // fallback name for VCP 0xF0 code
+
+// Probe every VCP 0xF0 code: set it, wait, read B/C, restore original.
+// notifyWnd: PostMessage(notifyWnd, WM_APP+42, 0, 0) when done (may be NULL).
+// Must run on the worker thread (I2C / DDC-CI).
+void DisplayScanPresets(HWND notifyWnd);
 
 // -----------------------------------------------------------------------
 //  Public API

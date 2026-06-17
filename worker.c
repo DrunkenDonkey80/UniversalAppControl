@@ -85,6 +85,12 @@ DWORD WINAPI WorkerThreadProc(LPVOID param) {
                 CrashLog("[worker] DisplayApplyPreset returned\n");
                 break;
             }
+            case JOB_SCAN_PRESETS: {
+                extern HWND gScanNotifyHwnd;
+                DisplayScanPresets(gScanNotifyHwnd);
+                gScanNotifyHwnd = NULL;
+                break;
+            }
             case JOB_SHUTDOWN:
                 CoUninitialize();
                 return 0;

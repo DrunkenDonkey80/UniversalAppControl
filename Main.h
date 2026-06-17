@@ -104,6 +104,7 @@ extern NOTIFYICONDATA gTrayNotifyIconData;
 bool LoadConfig(void);
 
 extern CRITICAL_SECTION gHotkeyLock;   // guards gHotkeys/gNumHotkeys + Triggered
+extern HWND gScanNotifyHwnd;           // preset editor HWND to notify when scan done
 void DispatchHotkey(int hotkeyIndex);  // worker-side: runs the heavy toggle work
 void RebuildHotkeys(void);             // rebuild gHotkeys from in-memory gProfiles; caller holds gHotkeyLock
 const wchar_t* GetExePath(void);

@@ -42,6 +42,11 @@ int  gPrimaryVcp14Count = 0;  // 0 = not probed, -1 = not supported
 BYTE gPrimaryVcpF0Vals[MAX_VCP14_VALS] = {0};
 int  gPrimaryVcpF0Count = 0;
 
+// Probed preset table — one entry per VCP 0xF0 code.
+MonPresetInfo    gMonPresets[MAX_VCP14_VALS] = {0};
+int              gMonPresetCount  = 0;
+volatile bool    gScanInProgress  = false;
+
 // Last values WE applied (worker-thread only; no locking needed).
 static struct { int b, c, ct, pm; } gLastApplied =
     { PRESET_UNSET, PRESET_UNSET, PRESET_UNSET, PRESET_UNSET };
@@ -193,6 +198,110 @@ void DisplayResetLastApplied(void) {
     gLastApplied.pm = PRESET_UNSET;
 }
 
+// Build gMonPresets[] from gPrimaryVcpF0Vals — names from GetVcpF0Label(),
+// B/C = PRESET_UNSET until a scan runs.  Preserves existing scanned data
+// for codes that are already in the table.
+static void RebuildMonPresets(void) {
+    for (int i = 0; i < gPrimaryVcpF0Count && i < MAX_VCP14_VALS; i++) {
+        BYTE code = gPrimaryVcpF0Vals[i];
+        // Keep existing entry if already scanned for this code
+        bool exists = false;
+        for (int j = 0; j < gMonPresetCount; j++) {
+            if (gMonPresets[j].vcpCode == code) { exists = true; break; }
+        }
+        if (!exists) {
+            gMonPresets[i].vcpCode    = code;
+            wcscpy_s(gMonPresets[i].name, 64, GetVcpF0Label(code));
+            gMonPresets[i].brightness = PRESET_UNSET;
+            gMonPresets[i].contrast   = PRESET_UNSET;
+            gMonPresets[i].scanned    = false;
+        }
+    }
+    gMonPresetCount = gPrimaryVcpF0Count;
+}
+
+// -----------------------------------------------------------------------
+//  DisplayScanPresets  (runs on worker thread)
+// -----------------------------------------------------------------------
+
+void DisplayScanPresets(HWND notifyWnd) {
+    gScanInProgress = true;
+    CrashLog("[display] ScanPresets start (%d codes)\n", gPrimaryVcpF0Count);
+
+    PHYSICAL_MONITOR pm[MAX_PHYSICAL_PER_HMONITOR];
+    DWORD n = OpenPrimaryPhysicals(pm, MAX_PHYSICAL_PER_HMONITOR);
+    if (n == 0) { gScanInProgress = false; return; }
+
+    HANDLE h = pm[0].hPhysicalMonitor;
+
+    // Save the current VCP 0xF0 value so we can restore it afterwards
+    DWORD fType=0, origF0=0, fMax=0;
+    GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &fType, &origF0, &fMax);
+    CrashLog("[display] ScanPresets: origF0=0x%02lX\n", origF0);
+
+    // Get current caps so we know whether B/C are readable
+    EnterCriticalSection(&gMonLock);
+    DWORD caps = gPrim.caps;
+    LeaveCriticalSection(&gMonLock);
+    if (!caps) GetMonitorCapabilities(h, &caps, &(DWORD){0});
+
+    for (int i = 0; i < gPrimaryVcpF0Count && i < MAX_VCP14_VALS; i++) {
+        BYTE code = gPrimaryVcpF0Vals[i];
+        gMonPresets[i].vcpCode = code;
+        wcscpy_s(gMonPresets[i].name, 64, GetVcpF0Label(code));
+
+        // Switch to this preset
+        BOOL setOk = FALSE;
+        __try { setOk = SetVCPFeature(h, 0xF0, code); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { setOk = FALSE; }
+        CrashLog("[display] scan F0=0x%02X set=%d\n", code, setOk);
+
+        if (!setOk) {
+            gMonPresets[i].brightness = PRESET_UNSET;
+            gMonPresets[i].contrast   = PRESET_UNSET;
+            gMonPresets[i].scanned    = false;
+            continue;
+        }
+
+        // Wait for Dell firmware to apply the new preset's B/C defaults
+        Sleep(350);
+
+        // Read back brightness and contrast
+        DWORD mn=0, cur=0, mx=0;
+        gMonPresets[i].brightness = PRESET_UNSET;
+        gMonPresets[i].contrast   = PRESET_UNSET;
+
+        if (caps & MC_CAPS_BRIGHTNESS) {
+            BOOL got = FALSE;
+            __try { got = GetMonitorBrightness(h, &mn, &cur, &mx); }
+            __except(EXCEPTION_EXECUTE_HANDLER) { got = FALSE; }
+            if (got && mx > mn) gMonPresets[i].brightness = RawToPct(cur, mn, mx);
+        }
+        if (caps & MC_CAPS_CONTRAST) {
+            BOOL got = FALSE;
+            __try { got = GetMonitorContrast(h, &mn, &cur, &mx); }
+            __except(EXCEPTION_EXECUTE_HANDLER) { got = FALSE; }
+            if (got && mx > mn) gMonPresets[i].contrast = RawToPct(cur, mn, mx);
+        }
+        gMonPresets[i].scanned = true;
+        CrashLog("[display] scan F0=0x%02X B=%d C=%d\n",
+                 code, gMonPresets[i].brightness, gMonPresets[i].contrast);
+    }
+    gMonPresetCount = gPrimaryVcpF0Count;
+
+    // Restore the original preset
+    if (origF0) {
+        __try { SetVCPFeature(h, 0xF0, origF0); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        Sleep(100);
+    }
+
+    DestroyPhysicalMonitors(n, pm);
+    gScanInProgress = false;
+    CrashLog("[display] ScanPresets done\n");
+
+    if (notifyWnd) PostMessageW(notifyWnd, WM_APP + 42, 0, 0);
+}
+
 // -----------------------------------------------------------------------
 //  DisplayInit / DisplayRefresh
 // -----------------------------------------------------------------------
@@ -297,8 +406,9 @@ void DisplayInit(void) {
     }
 
     DestroyPhysicalMonitors(n, pm);
-    CrashLog("[display] Init done: caps=0x%08lX vcp14Count=%d\n",
-             gPrim.caps, gPrimaryVcp14Count);
+    RebuildMonPresets();
+    CrashLog("[display] Init done: caps=0x%08lX vcp14Count=%d vcpF0Count=%d\n",
+             gPrim.caps, gPrimaryVcp14Count, gPrimaryVcpF0Count);
 }
 
 void DisplayRefresh(void) {

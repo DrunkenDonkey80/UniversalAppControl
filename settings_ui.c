@@ -724,6 +724,25 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                         if (captured.ProfileMode != PRESET_UNSET) {
                             p->ProfileMode = captured.ProfileMode;
                             CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_CHECKED);
+                            // If this VCP code isn't in gMonPresets yet, add it so the
+                            // combo can show and select it (handles unseen presets and
+                            // monitors that were never fully scanned).
+                            bool added = DisplayRecordProfile(captured.ProfileMode);
+                            if (added) {
+                                // Stamp captured B/C onto the new entry for a useful label
+                                for (int _mi = 0; _mi < gMonPresetCount; _mi++) {
+                                    if (gMonPresets[_mi].vcpCode == (BYTE)captured.ProfileMode) {
+                                        gMonPresets[_mi].brightness = captured.Brightness;
+                                        gMonPresets[_mi].contrast   = captured.Contrast;
+                                        gMonPresets[_mi].scanned    =
+                                            (captured.Brightness != PRESET_UNSET ||
+                                             captured.Contrast   != PRESET_UNSET);
+                                        break;
+                                    }
+                                }
+                                // Rebuild combo so the new entry appears
+                                BuildProfileCombo(GetDlgItem(wnd, IDC_PE_PROFILE));
+                            }
                         }
                         PeLoadFields(wnd, gPeSelected);
                         SaveConfig();

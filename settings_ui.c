@@ -191,9 +191,7 @@ static void LoadSelectionToFields(HWND wnd, int idx) {
         SetDlgItemTextW(wnd, IDC_PATH,   L"");
         SetDlgItemTextW(wnd, IDC_HOTKEY, L"");
         SetDlgItemTextW(wnd, IDC_STATUS, L"");
-        CheckDlgButton(wnd, IDC_HIDE,  BST_UNCHECKED);
-        CheckDlgButton(wnd, IDC_MIN,   BST_UNCHECKED);
-        CheckDlgButton(wnd, IDC_PAUSE, BST_UNCHECKED);
+        ComboBox_SetCurSel(GetDlgItem(wnd, IDC_OPERATION), PROF_OP_NONE);
         CheckDlgButton(wnd, IDC_DISPLAYCTL,
                        gDisplayControlEnabled ? BST_CHECKED : BST_UNCHECKED);
         EnableProfileControls(wnd, FALSE);
@@ -215,9 +213,7 @@ static void LoadSelectionToFields(HWND wnd, int idx) {
     }
     wchar_t hk[64]; FormatHotkey(p->HotKey, p->HotKeyModifiers, hk, _countof(hk));
     SetDlgItemTextW(wnd, IDC_HOTKEY, hk);
-    CheckDlgButton(wnd, IDC_HIDE,  p->HideEnabled     ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(wnd, IDC_MIN,   p->MinimizeEnabled  ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(wnd, IDC_PAUSE, p->PauseEnabled     ? BST_CHECKED : BST_UNCHECKED);
+    ComboBox_SetCurSel(GetDlgItem(wnd, IDC_OPERATION), p->Operation);
     CheckDlgButton(wnd, IDC_DISPLAYCTL,
                    gDisplayControlEnabled ? BST_CHECKED : BST_UNCHECKED);
     RefreshPresetCombo(wnd, idx);
@@ -314,11 +310,15 @@ static void CreateControls(HWND wnd) {
     SetWindowSubclass(hkEdit, HotkeyEditSubclass, 0, 0);
     ry += 36;
 
-    MakeChild(wnd, L"BUTTON", L"Hide / show",        BS_AUTOCHECKBOX, FX, ry, FW, 22, IDC_HIDE);
-    ry += 26;
-    MakeChild(wnd, L"BUTTON", L"Minimize / restore", BS_AUTOCHECKBOX, FX, ry, FW, 22, IDC_MIN);
-    ry += 26;
-    MakeChild(wnd, L"BUTTON", L"Pause / resume",     BS_AUTOCHECKBOX, FX, ry, FW, 22, IDC_PAUSE);
+    MakeChild(wnd, L"STATIC", L"Operation:", SS_RIGHT, RX, ry+4, LBW, 20, 0);
+    {
+        HWND opCb = MakeChild(wnd, L"COMBOBOX", L"",
+            CBS_DROPDOWNLIST | WS_VSCROLL, FX, ry, FW, 120, IDC_OPERATION);
+        ComboBox_AddString(opCb, L"None");
+        ComboBox_AddString(opCb, L"Hide / Show");
+        ComboBox_AddString(opCb, L"Minimize / Restore");
+        ComboBox_AddString(opCb, L"Pause + Hide / Resume + Show");
+    }
     ry += 32;
 
     // --- Display preset row ---
@@ -362,9 +362,14 @@ static void ApplyFieldsToSelection(HWND wnd) {
         SetDlgItemTextW(wnd, IDC_HOTKEY, hk);
     }
 
-    p->HideEnabled     = IsDlgButtonChecked(wnd, IDC_HIDE)  == BST_CHECKED;
-    p->MinimizeEnabled = IsDlgButtonChecked(wnd, IDC_MIN)   == BST_CHECKED;
-    p->PauseEnabled    = IsDlgButtonChecked(wnd, IDC_PAUSE) == BST_CHECKED;
+    {
+        int op = ComboBox_GetCurSel(GetDlgItem(wnd, IDC_OPERATION));
+        p->Operation     = (op >= 0) ? op : PROF_OP_NONE;
+        // Keep legacy fields in sync
+        p->HideEnabled     = (op == PROF_OP_HIDE || op == PROF_OP_PAUSE);
+        p->MinimizeEnabled = (op == PROF_OP_MINIMIZE);
+        p->PauseEnabled    = (op == PROF_OP_PAUSE);
+    }
 
     // Save display preset selection
     HWND cb = GetDlgItem(wnd, IDC_PRESET);
@@ -961,7 +966,7 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_HOTKEY:
                     if (code == EN_KILLFOCUS) ApplyFieldsToSelection(wnd);
                     break;
-                case IDC_HIDE: case IDC_MIN: case IDC_PAUSE:
+                case IDC_OPERATION:
                     if (code == BN_CLICKED) ApplyFieldsToSelection(wnd);
                     break;
                 case IDC_REMOVE:

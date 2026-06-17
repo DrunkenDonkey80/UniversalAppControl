@@ -146,10 +146,9 @@ void LoadMonPresets(void) {
         wchar_t* name = wcstok_s(tmp, L"|", &ctx);
         wchar_t* bStr = wcstok_s(NULL, L"|", &ctx);
         wchar_t* cStr = wcstok_s(NULL, L"|", &ctx);
-        if (name && name[0])
-            wcscpy_s(gMonPresets[i].name, 64, name);
-        else
-            wcscpy_s(gMonPresets[i].name, 64, GetVcpE2Label((BYTE)code));
+        // Always use code-based label so name reflects the register value (e.g. "Profile 0E")
+        (void)name;
+        wcscpy_s(gMonPresets[i].name, 64, GetVcpE2Label((BYTE)code));
         if (bStr && bStr[0]) gMonPresets[i].brightness = _wtoi(bStr);
         if (cStr && cStr[0]) gMonPresets[i].contrast   = _wtoi(cStr);
         gMonPresets[i].scanned = (bStr && bStr[0]);
@@ -212,9 +211,8 @@ void SaveConfig(void) {
         WritePrivateProfileStringW(section, L"Hotkey", hk, path);
         WritePrivateProfileStringW(section, L"ProgramExeName", p->ProgramExeName, path);
         WritePrivateProfileStringW(section, L"ProgramPath", p->ProgramPath, path);
-        WriteBool(section, L"Hide", p->HideEnabled);
-        WriteBool(section, L"Minimize", p->MinimizeEnabled);
-        WriteBool(section, L"Pause", p->PauseEnabled);
+        wchar_t opStr[4]; swprintf_s(opStr, _countof(opStr), L"%d", p->Operation);
+        WritePrivateProfileStringW(section, L"Operation", opStr, path);
         if (p->DisplayPreset[0])
             WritePrivateProfileStringW(section, L"DisplayPreset",
                                        p->DisplayPreset, path);

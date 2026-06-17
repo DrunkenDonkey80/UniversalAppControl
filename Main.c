@@ -285,9 +285,21 @@ static bool ReadConfig() {
 			//profile
 			RegisterConfigHotkey(sectionName, L"Hotkey", gNumProfiles);
 
-			gProfiles[gNumProfiles].HideEnabled = ReadConfigBool(sectionName, L"Hide", false);
-			gProfiles[gNumProfiles].PauseEnabled = ReadConfigBool(sectionName, L"Pause", false);
-			gProfiles[gNumProfiles].MinimizeEnabled = ReadConfigBool(sectionName, L"Minimize", false);
+			// Load Operation (new) or derive from legacy Hide/Pause/Min bools
+			wchar_t opTmp[16] = {0};
+			if (GetPrivateProfileStringW(sectionName, L"Operation", L"", opTmp, _countof(opTmp), iniFilePath) > 0 && opTmp[0]) {
+				gProfiles[gNumProfiles].Operation = _wtoi(opTmp);
+			} else {
+				bool h = ReadConfigBool(sectionName, L"Hide", false);
+				bool p = ReadConfigBool(sectionName, L"Pause", false);
+				bool m = ReadConfigBool(sectionName, L"Minimize", false);
+				gProfiles[gNumProfiles].Operation = p ? PROF_OP_PAUSE
+				    : h ? PROF_OP_HIDE : m ? PROF_OP_MINIMIZE : PROF_OP_NONE;
+			}
+			// Keep legacy fields in sync for code that still reads them
+			gProfiles[gNumProfiles].HideEnabled     = (gProfiles[gNumProfiles].Operation == PROF_OP_HIDE  || gProfiles[gNumProfiles].Operation == PROF_OP_PAUSE);
+			gProfiles[gNumProfiles].PauseEnabled    = (gProfiles[gNumProfiles].Operation == PROF_OP_PAUSE);
+			gProfiles[gNumProfiles].MinimizeEnabled = (gProfiles[gNumProfiles].Operation == PROF_OP_MINIMIZE);
 
 			ReadConfigString(sectionName, L"ProgramExeName", gProfiles[gNumProfiles].ProgramExeName);
 			ReadConfigString(sectionName, L"ProgramPath", gProfiles[gNumProfiles].ProgramPath);
@@ -544,11 +556,12 @@ bool HideWindowForProfile(HWND hWnd, int profileId, HWND activeWindow) {
 		if (hWnd == activeWindow)
 			gProfiles[profileId].ForegroundWindow = hWnd;
 
-		if (gProfiles[profileId].HideEnabled && IsWindowVisible(hWnd)) {
+		int op = gProfiles[profileId].Operation;
+		if ((op == PROF_OP_HIDE || op == PROF_OP_PAUSE) && IsWindowVisible(hWnd)) {
 			ShowWindow(hWnd, SW_HIDE);
 			windowChanged = true;
 		}
-		else if (gProfiles[profileId].MinimizeEnabled && IsWindowVisible(hWnd) && !IsIconic(hWnd)) {
+		else if (op == PROF_OP_MINIMIZE && IsWindowVisible(hWnd) && !IsIconic(hWnd)) {
 			ShowWindow(hWnd, SW_MINIMIZE);
 			windowChanged = true;
 		}
@@ -573,7 +586,7 @@ bool HideWindowsForPofile(int profileId) {
 		}
 	}
 	else if (gProfiles[profileId].ProgramExeName[0] &&
-	         (gProfiles[profileId].HideEnabled || gProfiles[profileId].MinimizeEnabled)) {
+	         gProfiles[profileId].Operation != PROF_OP_NONE) {
 		for (int i = 0; i < gNumWindowInfo; i++) {
 			if (_wcsicmp(gWindowInfo[i].ExeName, gProfiles[profileId].ProgramExeName) == 0) {
 				if (HideWindowForProfile(gWindowInfo[i].WindowHandle, profileId, activeWindow))
@@ -618,7 +631,8 @@ bool RestoreWindowsForPofile(int profileId) {
 	for (int i = 0; i < gProfiles[profileId].NumHiddenWindows; i++) {
 		HWND hw = gProfiles[profileId].HiddenWindows[i];
 		if (!IsWindow(hw)) continue;
-		if (RestoreWindow(hw, gProfiles[profileId].HideEnabled, gProfiles[profileId].MinimizeEnabled))
+		int op_ = gProfiles[profileId].Operation;
+	if (RestoreWindow(hw, op_ == PROF_OP_HIDE || op_ == PROF_OP_PAUSE, op_ == PROF_OP_MINIMIZE))
 			windowChanged = true;
 		if (toFocus == NULL) toFocus = hw;
 		if (hw == gProfiles[profileId].ForegroundWindow) toFocus = hw;
@@ -648,36 +662,32 @@ bool RestoreWindowsForPofile(int profileId) {
 //}
 
 void HandleProfile(int profileId, bool trigger) {
+	int op  = gProfiles[profileId].Operation;
+	u32 pid = gProfiles[profileId].ProcessID;
+
+	if (op == PROF_OP_PAUSE && pid != 0) {
+		// For pause mode: check ACTUAL process state, not a toggle flag.
+		// Suspended → resume then show.  Running → hide then suspend.
+		bool suspended = IsProcessSuspended(pid);
+		if (suspended) {
+			// Resume first, then restore windows
+			ResumeProcess(pid);
+			Sleep(10);
+			RestoreWindowsForPofile(profileId);
+		} else {
+			// Hide windows first, then suspend
+			gProfiles[profileId].ForegroundWindow = 0;
+			bool changed = HideWindowsForPofile(profileId);
+			if (changed) Sleep(10);
+			SuspendProcess(pid);
+		}
+		return;
+	}
 
 	if (trigger) {
-		//order is - hide/minimize/pause here, windows first, processes last
-		bool windowChanged = false;
 		gProfiles[profileId].ForegroundWindow = 0;
-
-		//work with all process windows then
-		windowChanged = HideWindowsForPofile(profileId);
-
-		//now pause stuff if needed
-		if (gProfiles[profileId].PauseEnabled) {
-			if (gProfiles[profileId].ProcessID != 0) {
-				if (windowChanged) {
-					//give it some time to react before pausing
-					Sleep(10);
-					windowChanged = false;
-				}
-
-				SuspendProcess(gProfiles[profileId].ProcessID);
-			}
-		}
-	}
-	else {
-		//order is - unpause / show / restore here, processes first, windows last
-		bool processAwoken = false;
-		if (gProfiles[profileId].PauseEnabled && gProfiles[profileId].ProcessID != 0) {
-			ResumeProcess(gProfiles[profileId].ProcessID);
-			processAwoken = true;
-		}
-		if (processAwoken) Sleep(10);
+		HideWindowsForPofile(profileId);
+	} else {
 		RestoreWindowsForPofile(profileId);
 	}
 }
@@ -900,6 +910,8 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 			return RunSelfTests();
 		if (lstrcmpiW(__wargv[ai], L"--monitor-debug") == 0)
 			return RunMonitorDebug();
+		if (lstrcmpiW(__wargv[ai], L"--vcp-sweep") == 0)
+			return RunVcpSweep();
 	}
 
 	// Install crash logger
@@ -1043,7 +1055,9 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	{
 		while (PeekMessageW(&WndMsg, NULL, 0, 0, PM_REMOVE)) {
 			if (WndMsg.message == WM_QUIT) { gIsRunning = FALSE; break; }
-			if (gSettingsWnd && IsDialogMessageW(gSettingsWnd, &WndMsg))
+			// Don't pass WM_SYSKEYDOWN through IsDialogMessage — it eats Alt+key combos
+			// preventing Alt+OEM_3 (and similar) from reaching the hotkey edit subclass.
+			if (WndMsg.message != WM_SYSKEYDOWN && gSettingsWnd && IsDialogMessageW(gSettingsWnd, &WndMsg))
 				continue;
 			TranslateMessage(&WndMsg);
 			DispatchMessageW(&WndMsg);

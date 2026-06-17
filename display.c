@@ -167,30 +167,11 @@ const wchar_t* GetVcp14Label(BYTE code) {
     }
 }
 
-// VCP 0xE2 picture-mode labels for Dell S3422DWG.
-// 0x0E=Warm confirmed by VCP sweep; other codes from Dell S-series community docs.
+// VCP 0xE2 picture-mode label: always "Profile XX" so the identifier is the raw register value.
 const wchar_t* GetVcpE2Label(BYTE code) {
-    switch (code) {
-        case 0x00: return L"Standard";
-        case 0x04: return L"FPS";
-        case 0x0E: return L"Warm";
-        case 0x12: return L"Cool";
-        case 0x14: return L"Custom Color";
-        case 0x1D: return L"FPS Game";
-        case 0x1E: return L"RTS Game";
-        case 0x1F: return L"RPG Game";
-        case 0x20: return L"Movie";
-        case 0x21: return L"Sports";
-        case 0x22: return L"Game";
-        case 0x27: return L"Night";
-        case 0x2F: return L"ComfortView";
-        case 0x3A: return L"sRGB";
-        default: {
-            static wchar_t buf[16];
-            swprintf_s(buf, 16, L"Mode 0x%02X", code);
-            return buf;
-        }
-    }
+    static wchar_t buf[16];
+    swprintf_s(buf, 16, L"Profile %02X", code);
+    return buf;
 }
 
 void DisplayResetLastApplied(void) {

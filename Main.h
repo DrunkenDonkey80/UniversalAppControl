@@ -66,6 +66,8 @@ typedef struct _PROFILE_CONFIG
 	u32 HotKey;
 	UINT HotKeyModifiers;
 
+	int  Operation;       // PROF_OP_* — replaces HideEnabled/PauseEnabled/MinimizeEnabled
+	// Legacy fields kept so old config files load correctly; derived into Operation on load.
 	BOOL HideEnabled;
 	BOOL PauseEnabled;
 	BOOL MinimizeEnabled;

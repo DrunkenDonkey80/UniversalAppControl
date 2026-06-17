@@ -534,3 +534,51 @@ int RunMonitorDebug(void) {
     fclose(gMdLog); gMdLog = NULL;
     return 0;
 }
+
+// -----------------------------------------------------------------------
+//  RunVcpSweep  --vcp-sweep
+//  Calls DisplayInit() then probes all 256 VCP codes using DisplayProbeVcp
+//  (same physical monitor path as the real app).  Logs to %TEMP%\uac-vcp-sweep.txt
+// -----------------------------------------------------------------------
+int RunVcpSweep(void) {
+    char logPath[MAX_PATH];
+    GetTempPathA(MAX_PATH, logPath);
+    strcat_s(logPath, MAX_PATH, "uac-vcp-sweep.txt");
+    FILE* f = NULL;
+    fopen_s(&f, logPath, "w");
+    if (!f) return 1;
+
+    fprintf(f, "=== VCP Sweep (DisplayInit context) ===\n");
+    fprintf(f, "Log: %s\n\n", logPath);
+
+    DisplayInit();
+    if (!DisplayIsInited()) {
+        fprintf(f, "DisplayInit failed -- no primary monitor found\n");
+        fclose(f); return 1;
+    }
+    fprintf(f, "DisplayInit OK. Sweeping all 256 VCP codes...\n");
+    fprintf(f, "Monitor in 'Warm' mode during this sweep.\n\n");
+    fprintf(f, "VCP   ok   cur        max        type\n");
+    fprintf(f, "----  ---  ---------  ---------  ----\n");
+
+    int hits = 0;
+    for (int code = 0; code <= 0xFF; code++) {
+        BOOL ok = FALSE; DWORD cur = 0, max = 0;
+        DisplayProbeVcp((BYTE)code, &ok, &cur, &max);
+        if (ok) {
+            fprintf(f, "0x%02X  yes  0x%02lX (%3lu)  0x%02lX (%3lu)\n",
+                    code, cur, cur, max, max);
+            hits++;
+        }
+        Sleep(15); // let DDC/CI bus breathe
+    }
+    fprintf(f, "\nResponded: %d / 256 VCP codes\n", hits);
+    fclose(f);
+
+    wchar_t msg[MAX_PATH + 80];
+    swprintf_s(msg, _countof(msg),
+        L"VCP sweep complete (%d codes responded).\nResults written to:\n%hs",
+        hits, logPath);
+    MessageBoxW(NULL, msg, L"--vcp-sweep done", MB_OK | MB_ICONINFORMATION);
+    return 0;
+}

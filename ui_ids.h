@@ -12,9 +12,16 @@
 #define IDC_NAME       3002
 #define IDC_PATH       3003
 #define IDC_HOTKEY     3004
-#define IDC_HIDE       3005
+#define IDC_HIDE       3005  // kept for legacy; use IDC_OPERATION
 #define IDC_MIN        3006
 #define IDC_PAUSE      3007
+#define IDC_OPERATION  3025  // operation combobox (None/Hide/Min/Pause+Hide)
+
+// Profile operation modes
+#define PROF_OP_NONE    0
+#define PROF_OP_HIDE    1
+#define PROF_OP_MINIMIZE 2
+#define PROF_OP_PAUSE   3   // hide windows then suspend; reverse on restore
 #define IDC_ADD        3008
 #define IDC_REMOVE     3009
 #define IDC_STARTUP    3010

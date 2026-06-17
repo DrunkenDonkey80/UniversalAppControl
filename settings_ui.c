@@ -398,15 +398,19 @@ static bool  gPeDone = false;    // set by WM_DESTROY to unblock ShowPresetEdito
 // Color temperature combo entries (value == Kelvin, or -1 for "don't change")
 typedef struct { const wchar_t* label; int kelvin; } CtEntry;
 static const CtEntry kCtEntries[] = {
-    { L"(don't change)", -1    },
-    { L"4000K (warm)",   4000  },
-    { L"5000K",          5000  },
-    { L"6500K (daylight)", 6500 },
-    { L"7500K",          7500  },
-    { L"8200K",          8200  },
-    { L"9300K (cool)",   9300  },
-    { L"10000K",         10000 },
-    { L"11500K (cold)",  11500 },
+    { L"(don't change)",             PRESET_UNSET     },
+    // Monitor-native modes (sent as VCP 0x14 directly, no Kelvin conversion)
+    { L"User Color (OSD warm)",      CT_USER_COLOR    },  // VCP 0x0C
+    { L"Custom Color (OSD RGB)",     CT_CUSTOM_COLOR  },  // VCP 0x0B
+    // Standard MCCS Kelvin presets (mapped to closest supported VCP code)
+    { L"4000K (warm)",               4000  },
+    { L"5000K",                      5000  },
+    { L"6500K (daylight)",           6500  },
+    { L"7500K",                      7500  },
+    { L"8200K",                      8200  },
+    { L"9300K (cool)",               9300  },
+    { L"10000K",                     10000 },
+    { L"11500K (cold)",              11500 },
 };
 #define CT_ENTRIES_COUNT ((int)(sizeof(kCtEntries)/sizeof(kCtEntries[0])))
 

@@ -315,17 +315,16 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
             out->Contrast = RawToPct(cur, mn, mx);
             ok = true;
         }
-        // Read color preset via VCP 0x14 (low-level) — more reliable than
-        // the high-level MC_CAPS_COLOR_TEMPERATURE / GetMonitorColorTemperature.
+        // Read color preset via VCP 0x14 (low-level).
         DWORD vcpType=0, vcpCur=0, vcpMax=0;
         if (GetVCPFeatureAndVCPFeatureReply(h, 0x14, &vcpType, &vcpCur, &vcpMax) &&
             vcpCur != 0) {
-            // Return the raw VCP code as a negative sentinel so the UI can
-            // display it meaningfully. Map back to nearest Kelvin.
-            // Standard MCCS VCP 0x14 codes:
-            static const int kVcpKelvin[] = { 0, 0, 0, 4000, 5000, 6500, 7500, 8200, 9300, 10000, 11500 };
-            out->ColorTemp = (vcpCur < 11) ? kVcpKelvin[vcpCur] : PRESET_UNSET;
-            if (out->ColorTemp > 0) ok = true;
+            if (vcpCur == 0x0C)      { out->ColorTemp = CT_USER_COLOR;   ok = true; }
+            else if (vcpCur == 0x0B) { out->ColorTemp = CT_CUSTOM_COLOR; ok = true; }
+            else if (vcpCur < (DWORD)VCP14_KELVIN_COUNT && kVcp14Kelvin[vcpCur] > 0) {
+                out->ColorTemp = kVcp14Kelvin[vcpCur];
+                ok = true;
+            }
         }
     }
 
@@ -459,10 +458,14 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset) {
             }
             if (got) {
                 if (firstTouch) vcp14Orig = vcpCur;
-                // Map Kelvin to closest SUPPORTED VCP code for this monitor.
+                // Map Kelvin (or special sentinel) to a VCP 0x14 code.
                 DWORD want14 = 0xFF;
-                if (si >= 0 && gMon[si].vcp14Count > 0) {
-                    // We have a parsed list — find the closest match.
+                if (preset->ColorTemp == CT_USER_COLOR) {
+                    want14 = 0x0C;  // User Color / OSD custom warm
+                } else if (preset->ColorTemp == CT_CUSTOM_COLOR) {
+                    want14 = 0x0B;  // Custom Color / manual RGB
+                } else if (si >= 0 && gMon[si].vcp14Count > 0) {
+                    // We have a parsed list — find the closest supported match.
                     BYTE closest = FindClosestVcp14(gMon[si].vcp14Vals,
                                                     gMon[si].vcp14Count,
                                                     preset->ColorTemp);

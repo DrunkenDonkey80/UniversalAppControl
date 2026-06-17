@@ -49,7 +49,8 @@ typedef struct _DISPLAY_PRESET
 	int Brightness;   // 0-100 percent, or PRESET_UNSET
 	int Contrast;     // 0-100 percent, or PRESET_UNSET
 	int ColorTemp;    // VCP 0x14 code (1-255), legacy Kelvin (>=256), or PRESET_UNSET
-	int ProfileMode;  // VCP 0xF0 code (1-255) or PRESET_UNSET
+	int ProfileMode;    // VCP value to write, or PRESET_UNSET
+	int ProfileModeVcp; // which VCP register holds it (e.g. 0xE2, 0xDC, 0x14); 0 = not set
 	                  // Selects the monitor's named preset (ComfortView=0x0C, FPS=0x0F...)
 	                  // Applied FIRST so B/C/CT can override the preset defaults.
 } DISPLAY_PRESET;

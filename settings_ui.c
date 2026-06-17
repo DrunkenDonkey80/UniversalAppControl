@@ -240,11 +240,18 @@ static LRESULT CALLBACK HotkeyEditSubclass(HWND hWnd, UINT msg, WPARAM wp, LPARA
             if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU ||
                 vk == VK_LWIN  || vk == VK_RWIN)
                 return 0;
-            if (vk == VK_TAB || vk == VK_ESCAPE)
+            if (vk == VK_TAB)
                 return DefSubclassProc(hWnd, msg, wp, lp);
-            if (vk == VK_BACK || vk == VK_DELETE) {
-                SetWindowTextW(hWnd, L"");
-                return 0;
+            // Esc / Del / Backspace without any modifier = clear the box
+            {
+                BOOL shift = GetKeyState(VK_SHIFT)   & 0x8000;
+                BOOL ctrl  = GetKeyState(VK_CONTROL) & 0x8000;
+                BOOL alt   = GetKeyState(VK_MENU)    & 0x8000;
+                if (!shift && !ctrl && !alt &&
+                    (vk == VK_ESCAPE || vk == VK_BACK || vk == VK_DELETE)) {
+                    SetWindowTextW(hWnd, L"");
+                    return 0;
+                }
             }
             BOOL shift = GetKeyState(VK_SHIFT)   & 0x8000;
             BOOL ctrl  = GetKeyState(VK_CONTROL) & 0x8000;
@@ -401,24 +408,22 @@ static int   gPeSelected = -1;   // selected preset index in the editor
 static bool  gPeDone = false;    // set by WM_DESTROY to unblock ShowPresetEditor
 
 // Build the Monitor Preset combo from gMonPresets[].
-// Item data = VCP code (PRESET_UNSET = -1 for "(none)").
+// Item data = packed (vcpReg << 8 | vcpCode); -1 for "(none)".
 static void BuildProfileCombo(HWND cb) {
     int prev = ComboBox_GetCurSel(cb);
-    LRESULT prevCode = (prev >= 0) ?
-        SendMessage(cb, CB_GETITEMDATA, prev, 0) : CB_ERR;
+    LRESULT prevKey = (prev >= 0) ? SendMessage(cb, CB_GETITEMDATA, prev, 0) : CB_ERR;
 
     ComboBox_ResetContent(cb);
     int idx = ComboBox_AddString(cb, L"(none)");
-    SendMessage(cb, CB_SETITEMDATA, idx, (LPARAM)PRESET_UNSET);
+    SendMessage(cb, CB_SETITEMDATA, idx, (LPARAM)(INT_PTR)PRESET_UNSET);
 
     int newSel = 0;
     for (int i = 0; i < gMonPresetCount; i++) {
-        wchar_t label[128];
-        MonPresetInfo* p = &gMonPresets[i];
-        swprintf_s(label, _countof(label), L"%s", p->name);
-        idx = ComboBox_AddString(cb, label);
-        SendMessage(cb, CB_SETITEMDATA, idx, (LPARAM)(INT_PTR)(int)p->vcpCode);
-        if ((LRESULT)(INT_PTR)(int)p->vcpCode == prevCode) newSel = idx;
+        MonPresetInfo* mp = &gMonPresets[i];
+        idx = ComboBox_AddString(cb, mp->name);
+        LRESULT key = (LRESULT)((mp->vcpReg << 8) | mp->vcpCode);
+        SendMessage(cb, CB_SETITEMDATA, idx, (LPARAM)key);
+        if (key == prevKey) newSel = idx;
     }
     ComboBox_SetCurSel(cb, newSel);
 }
@@ -505,17 +510,19 @@ static void PeLoadFields(HWND wnd, int idx) {
         SendDlgItemMessage(wnd, IDC_PE_CONT, TBM_SETPOS, TRUE, 50);
         CheckDlgButton(wnd, IDC_PE_CONT_CHK, BST_UNCHECKED);
     }
-    // Monitor Preset combo (VCP 0xF0) + checkbox
+    // Monitor Preset combo + checkbox
     {
         HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
         int cnt = ComboBox_GetCount(prCb); int sel = 0;
-        for (int i = 0; i < cnt; i++) {
-            LRESULT data = SendMessage(prCb, CB_GETITEMDATA, i, 0);
-            if ((int)data == p->ProfileMode) { sel = i; break; }
+        if (p->ProfileMode != PRESET_UNSET && p->ProfileModeVcp > 0) {
+            LRESULT wantKey = (LRESULT)((p->ProfileModeVcp << 8) | (p->ProfileMode & 0xFF));
+            for (int i = 0; i < cnt; i++) {
+                if (SendMessage(prCb, CB_GETITEMDATA, i, 0) == wantKey) { sel = i; break; }
+            }
         }
         ComboBox_SetCurSel(prCb, sel);
         CheckDlgButton(wnd, IDC_PE_PROF_CHK,
-            (p->ProfileMode != PRESET_UNSET) ? BST_CHECKED : BST_UNCHECKED);
+            (p->ProfileMode != PRESET_UNSET && p->ProfileModeVcp > 0) ? BST_CHECKED : BST_UNCHECKED);
     }
     PeUpdateLabels(wnd);
 }
@@ -535,18 +542,23 @@ static void PeSaveFields(HWND wnd) {
         p->Contrast = PRESET_UNSET;
     }
     p->ColorTemp = PRESET_UNSET;  // VCP 0x14 removed from UI; profile covers CT
-    // Monitor Preset (VCP 0xF0) — only save if checkbox is checked
+    // Monitor Preset — only save if checkbox is checked
     if (IsDlgButtonChecked(wnd, IDC_PE_PROF_CHK) == BST_CHECKED) {
         HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
         int sel = ComboBox_GetCurSel(prCb);
         if (sel > 0) {
-            LRESULT data = SendMessage(prCb, CB_GETITEMDATA, sel, 0);
-            p->ProfileMode = (data != CB_ERR) ? (int)data : PRESET_UNSET;
+            LRESULT key = SendMessage(prCb, CB_GETITEMDATA, sel, 0);
+            if (key != CB_ERR && (int)key != PRESET_UNSET) {
+                p->ProfileModeVcp = (int)((key >> 8) & 0xFF);
+                p->ProfileMode    = (int)(key & 0xFF);
+            } else {
+                p->ProfileMode = PRESET_UNSET; p->ProfileModeVcp = 0;
+            }
         } else {
-            p->ProfileMode = PRESET_UNSET;
+            p->ProfileMode = PRESET_UNSET; p->ProfileModeVcp = 0;
         }
     } else {
-        p->ProfileMode = PRESET_UNSET;
+        p->ProfileMode = PRESET_UNSET; p->ProfileModeVcp = 0;
     }
 }
 
@@ -741,28 +753,17 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                         // --- Monitor preset (VCP 0xF0) ---
                         // Always fill: add to gMonPresets if new, stamp B/C for a richer
                         // label, rebuild combo, then select — regardless of checkbox state.
-                        if (captured.ProfileMode != PRESET_UNSET) {
-                            p->ProfileMode = captured.ProfileMode;
-                            // Add to known presets if not already there
-                            DisplayRecordProfile(captured.ProfileMode);
-                            // Stamp captured B/C for a richer combo label
-                            for (int _mi = 0; _mi < gMonPresetCount; _mi++) {
-                                if (gMonPresets[_mi].vcpCode == (BYTE)captured.ProfileMode) {
-                                    if (captured.Brightness != PRESET_UNSET)
-                                        gMonPresets[_mi].brightness = captured.Brightness;
-                                    if (captured.Contrast != PRESET_UNSET)
-                                        gMonPresets[_mi].contrast = captured.Contrast;
-                                    gMonPresets[_mi].scanned = true;
-                                    break;
-                                }
-                            }
-                            SaveMonPresets();
-                            // Rebuild combo so new/updated entry appears, then select it
+                        if (captured.ProfileMode != PRESET_UNSET && captured.ProfileModeVcp > 0) {
+                            p->ProfileMode    = captured.ProfileMode;
+                            p->ProfileModeVcp = captured.ProfileModeVcp;
+                            // Rebuild combo and select the captured entry (VCP code:value)
                             HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
                             BuildProfileCombo(prCb);
+                            // Pack (vcpCode << 8 | vcpValue) as item data key
+                            LRESULT wantKey = (LRESULT)((captured.ProfileModeVcp << 8) | (captured.ProfileMode & 0xFF));
                             int cnt = ComboBox_GetCount(prCb);
                             for (int _ci = 0; _ci < cnt; _ci++) {
-                                if ((int)SendMessage(prCb, CB_GETITEMDATA, _ci, 0) == p->ProfileMode) {
+                                if (SendMessage(prCb, CB_GETITEMDATA, _ci, 0) == wantKey) {
                                     ComboBox_SetCurSel(prCb, _ci);
                                     break;
                                 }
@@ -816,25 +817,27 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                         L"Make sure DDC/CI is enabled in the monitor OSD.",
                         APPNAME, MB_OK | MB_ICONWARNING);
                 } else {
-                    bool added = DisplayRecordProfile(vcpCode);
-                    if (!added) {
-                        // Already recorded — just show which one it is
-                        wchar_t msg[128];
-                        swprintf_s(msg, _countof(msg),
-                            L"'%s' (0x%02X) is already in the list.",
-                            GetVcpE2Label((BYTE)vcpCode), (BYTE)vcpCode);
-                        MessageBoxW(wnd, msg, APPNAME, MB_OK | MB_ICONINFORMATION);
-                    } else {
-                        SaveMonPresets();
-                        BuildProfileCombo(GetDlgItem(wnd, IDC_PE_PROFILE));
-                        // Select the newly added entry
-                        HWND cb = GetDlgItem(wnd, IDC_PE_PROFILE);
-                        int cnt = ComboBox_GetCount(cb);
-                        for (int i = 0; i < cnt; i++) {
-                            if ((int)SendMessage(cb, CB_GETITEMDATA, i, 0) == vcpCode) {
-                                ComboBox_SetCurSel(cb, i); break;
-                            }
+                    // vcpCode from DisplayReadCurrentPreset — we don't know which register was used;
+                    // probe candidates to find which one returned this value
+                    BYTE usedReg = 0xE2; // fallback
+                    {
+                        static const BYTE kCands[] = { 0xE2, 0xDC, 0x14 };
+                        for (int ci = 0; ci < 3; ci++) {
+                            DWORD vt=0,vc=0,vm=0; BOOL ok2=FALSE;
+                            __try { ok2 = GetVCPFeatureAndVCPFeatureReply(
+                                DisplayGetPrimaryHandle(), kCands[ci], &vt, &vc, &vm); }
+                            __except(EXCEPTION_EXECUTE_HANDLER){ok2=FALSE;}
+                            if (ok2 && vm > 1 && (int)vc == vcpCode) { usedReg=kCands[ci]; break; }
                         }
+                    }
+                    bool added = DisplayRecordProfile(usedReg, vcpCode);
+                    SaveMonPresets();
+                    BuildProfileCombo(GetDlgItem(wnd, IDC_PE_PROFILE));
+                    if (!added) {
+                        wchar_t msg_[128];
+                        swprintf_s(msg_, _countof(msg_), L"Already recorded: %s",
+                            FormatPresetLabel(usedReg, (BYTE)vcpCode));
+                        MessageBoxW(wnd, msg_, APPNAME, MB_OK | MB_ICONINFORMATION);
                     }
                 }
             }

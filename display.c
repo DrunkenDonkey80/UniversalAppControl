@@ -167,10 +167,18 @@ const wchar_t* GetVcp14Label(BYTE code) {
     }
 }
 
-// VCP 0xE2 picture-mode label: always "Profile XX" so the identifier is the raw register value.
+// Label for a (vcpCode, vcpValue) pair: e.g. "VCP E2:0E"
+// Used for gMonPresets and combo display.
 const wchar_t* GetVcpE2Label(BYTE code) {
+    // Legacy: called with just the value; kept for DisplayRecordProfile path
     static wchar_t buf[16];
     swprintf_s(buf, 16, L"Profile %02X", code);
+    return buf;
+}
+
+const wchar_t* FormatPresetLabel(BYTE vcpCode, BYTE vcpValue) {
+    static wchar_t buf[24];
+    swprintf_s(buf, 24, L"VCP %02X:%02X", vcpCode, vcpValue);
     return buf;
 }
 
@@ -183,6 +191,16 @@ void DisplayResetLastApplied(void) {
 
 // Read the current VCP 0xF0 value — GET only, never changes anything.
 bool DisplayIsInited(void)  { return gMonInited; }
+
+// Returns the handle of the first primary physical monitor.
+// Opens a new set each call — caller must call DisplayReleasePrimaryHandle() when done.
+static PHYSICAL_MONITOR s_hPrimPm[MAX_PHYSICAL_PER_HMONITOR];
+static DWORD            s_hPrimN  = 0;
+HANDLE DisplayGetPrimaryHandle(void) {
+    if (s_hPrimN > 0) DestroyPhysicalMonitors(s_hPrimN, s_hPrimPm);
+    s_hPrimN = OpenPrimaryPhysicals(s_hPrimPm, MAX_PHYSICAL_PER_HMONITOR);
+    return (s_hPrimN > 0) ? s_hPrimPm[0].hPhysicalMonitor : NULL;
+}
 
 void DisplayProbeVcp(BYTE vcpCode, BOOL* outOk, DWORD* outCur, DWORD* outMax) {
     *outOk = FALSE; *outCur = 0; *outMax = 0;
@@ -203,29 +221,36 @@ int DisplayReadCurrentPreset(void) {
     DWORD n = OpenPrimaryPhysicals(pm, MAX_PHYSICAL_PER_HMONITOR);
     if (n == 0) return PRESET_UNSET;
     HANDLE h = pm[0].hPhysicalMonitor;
-    DWORD vcpType=0, vcpCur=0, vcpMax=0;
-    BOOL ok = FALSE;
-    __try { ok = GetVCPFeatureAndVCPFeatureReply(h, 0xE2, &vcpType, &vcpCur, &vcpMax); }
-    __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+    static const BYTE kCandidates[] = { 0xE2, 0xDC, 0x14 };
+    int result = PRESET_UNSET;
+    for (int ci = 0; ci < (int)(sizeof(kCandidates)/sizeof(kCandidates[0])); ci++) {
+        DWORD vt=0, vc=0, vm=0; BOOL ok=FALSE;
+        __try { ok = GetVCPFeatureAndVCPFeatureReply(h, kCandidates[ci], &vt, &vc, &vm); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { ok=FALSE; }
+        if (ok && vm > 1) { result = (int)vc; break; }
+    }
     DestroyPhysicalMonitors(n, pm);
-    return ok ? (int)vcpCur : PRESET_UNSET;
+    return result;
 }
 
 // Add vcpCode to gMonPresets[] with a label from GetVcpF0Label().
 // No-ops if the code is already in the list.  Returns true if newly added.
-bool DisplayRecordProfile(int vcpCode) {
-    if (vcpCode < 0 || vcpCode > 255) return false;  // 0 is a valid VCP code
+bool DisplayRecordProfile(int vcpReg, int vcpCode) {
+    if (vcpCode < 0 || vcpCode > 255) return false;
+    // Already recorded if same reg+code pair exists
     for (int i = 0; i < gMonPresetCount; i++)
-        if (gMonPresets[i].vcpCode == (BYTE)vcpCode) return false; // already recorded
+        if (gMonPresets[i].vcpReg == (BYTE)vcpReg && gMonPresets[i].vcpCode == (BYTE)vcpCode)
+            return false;
     if (gMonPresetCount >= MAX_VCP14_VALS) return false;
     int i = gMonPresetCount++;
     memset(&gMonPresets[i], 0, sizeof(gMonPresets[i]));
+    gMonPresets[i].vcpReg     = (BYTE)vcpReg;
     gMonPresets[i].vcpCode    = (BYTE)vcpCode;
     gMonPresets[i].brightness = PRESET_UNSET;
     gMonPresets[i].contrast   = PRESET_UNSET;
     gMonPresets[i].scanned    = false;
-    wcscpy_s(gMonPresets[i].name, 64, GetVcpE2Label((BYTE)vcpCode));
-    CrashLog("[display] RecordProfile 0x%02X = %ls\n", (BYTE)vcpCode, gMonPresets[i].name);
+    wcscpy_s(gMonPresets[i].name, 64, FormatPresetLabel((BYTE)vcpReg, (BYTE)vcpCode));
+    CrashLog("[display] RecordProfile VCP%02X:%02X\n", (BYTE)vcpReg, (BYTE)vcpCode);
     return true;
 }
 
@@ -440,10 +465,31 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
         out->ColorTemp = (int)vcpCur;
         ok = true;
     }
-    // Profile mode: VCP 0xF0, store raw code (e.g. 0x0C=ComfortView, 0x0F=FPS...)
-    if (GetVCPFeatureAndVCPFeatureReply(h, 0xE2, &vcpType, &vcpCur, &vcpMax)) {
-        out->ProfileMode = (int)vcpCur;
-        ok = true;
+
+    // Picture-mode preset: probe common VCP registers in priority order.
+    // First non-zero hit wins — this auto-discovers the right register for any monitor:
+    //   0xE2 = Dell S-series / AW-series picture mode
+    //   0xDC = MCCS Display Mode (LG, Samsung, others)
+    //   0x14 = MCCS Color Preset / temperature (most monitors)
+    // Storing both the register (ProfileModeVcp) and value (ProfileMode) means
+    // the same value is written back to the correct register on apply.
+    out->ProfileMode    = PRESET_UNSET;
+    out->ProfileModeVcp = 0;
+    {
+        static const BYTE kCandidates[] = { 0xE2, 0xDC, 0x14 };
+        for (int ci = 0; ci < (int)(sizeof(kCandidates)/sizeof(kCandidates[0])); ci++) {
+            BYTE vcp = kCandidates[ci];
+            DWORD vt=0, vc=0, vm=0; BOOL vok=FALSE;
+            __try { vok = GetVCPFeatureAndVCPFeatureReply(h, vcp, &vt, &vc, &vm); }
+            __except(EXCEPTION_EXECUTE_HANDLER) { vok=FALSE; }
+            if (vok && vm > 1) { // max>1 means it's a multi-value selector, not a boolean
+                out->ProfileMode    = (int)vc;
+                out->ProfileModeVcp = (int)vcp;
+                CrashLog("[display] Capture: VCP 0x%02X cur=0x%02lX max=0x%02lX\n", vcp, vc, vm);
+                ok = true;
+                break;
+            }
+        }
     }
 
     DestroyPhysicalMonitors(n, pm);
@@ -488,26 +534,26 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
     DWORD vcp14Orig = 0;
     DWORD vcpE2Orig = 0;
 
-    // Profile Mode (VCP 0xE2) — Dell picture mode, applied FIRST so B/C override.
-    if (preset->ProfileMode != PRESET_UNSET) {
+    // Picture-mode preset — use the VCP register stored alongside the value.
+    // ProfileModeVcp=0 means preset was captured with an old version; skip gracefully.
+    if (preset->ProfileMode != PRESET_UNSET && preset->ProfileModeVcp > 0) {
+        BYTE vcp  = (BYTE)preset->ProfileModeVcp;
         BYTE want = (BYTE)preset->ProfileMode;
         bool skip = !force && ((int)want == gLastApplied.pm);
         if (skip) {
-            CrashLog("[display] PM=0x%02X unchanged, skip\n", want);
+            CrashLog("[display] PM VCP=0x%02X val=0x%02X unchanged, skip\n", vcp, want);
         } else {
             DWORD fType=0, fCur=0, fMax=0; BOOL got=FALSE;
-            __try { got = GetVCPFeatureAndVCPFeatureReply(h, 0xE2, &fType, &fCur, &fMax); }
+            __try { got = GetVCPFeatureAndVCPFeatureReply(h, vcp, &fType, &fCur, &fMax); }
             __except(EXCEPTION_EXECUTE_HANDLER) { }
             if (got) {
-                // Save original even if fCur==0 (custom color state)
                 if (firstTouch) vcpE2Orig = fCur;
-                if (force || (BYTE)fCur != want) {
+                if (force || fCur != want) {
                     BOOL setOk=FALSE;
-                    __try { setOk = SetVCPFeature(h, 0xE2, want); anySet = true; }
+                    __try { setOk = SetVCPFeature(h, vcp, want); anySet = true; }
                     __except(EXCEPTION_EXECUTE_HANDLER) { }
                     gLastApplied.pm = (int)want;
-                    CrashLog("[display] SetVCPE2 0x%02X -> %d\n", want, setOk);
-                    // Dell resets B/C after preset switch; small yield gives it time
+                    CrashLog("[display] SetVCP 0x%02X val=0x%02X -> ok=%d\n", vcp, want, setOk);
                     Sleep(80);
                 } else {
                     gLastApplied.pm = (int)want;

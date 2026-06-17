@@ -279,6 +279,11 @@ static bool ReadConfig() {
 				gPresets[gNumPresets].ColorTemp = _wtoi(tmp);
 			if (GetPrivateProfileStringW(sectionName, L"ProfileMode", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
 				gPresets[gNumPresets].ProfileMode = _wtoi(tmp);
+			if (GetPrivateProfileStringW(sectionName, L"ProfileModeVcp", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0]) {
+				unsigned vcpHex = 0;
+				swscanf_s(tmp, L"%X", &vcpHex);
+				gPresets[gNumPresets].ProfileModeVcp = (int)vcpHex;
+			}
 			gNumPresets++;
 		}
 		else if (wcsncmp(sectionName, L"preset:", 7) != 0 && gNumProfiles < MAX_PROFILES) {
@@ -801,6 +806,17 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 				}
 			}
 			LeaveCriticalSection(&gHotkeyLock);
+
+			// Suppress hotkeys while the user is typing in the hotkey edit box
+			if (matchIndex >= 0 && gSettingsWnd) {
+				GUITHREADINFO gti = { sizeof(gti) };
+				DWORD settingsTid = GetWindowThreadProcessId(gSettingsWnd, NULL);
+				if (GetGUIThreadInfo(settingsTid, &gti)) {
+					HWND hkEdit = GetDlgItem(gSettingsWnd, IDC_HOTKEY);
+					if (hkEdit && gti.hwndFocus == hkEdit)
+						matchIndex = -1; // pretend no hotkey matched
+				}
+			}
 
 			if (matchIndex >= 0) {
 				if (down && !gHotkeyHeld[matchIndex]) {

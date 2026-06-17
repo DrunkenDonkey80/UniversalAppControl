@@ -22,11 +22,12 @@ extern int  gPrimaryVcpE2Count;
 // Probed preset table (VCP 0xF0).  Populated by DisplayScanPresets().
 // Until scanned, names come from GetVcpE2Label(); B/C are PRESET_UNSET.
 typedef struct {
-    BYTE    vcpCode;
-    wchar_t name[64];   // display label (best-guess or confirmed by scan)
-    int     brightness; // 0-100 read after switching, or PRESET_UNSET
-    int     contrast;   // 0-100 read after switching, or PRESET_UNSET
-    bool    scanned;    // true once B/C have been probed
+    BYTE    vcpReg;     // VCP register used (e.g. 0xE2, 0xDC, 0x14)
+    BYTE    vcpCode;    // VCP value for this preset
+    wchar_t name[64];   // display label
+    int     brightness; // 0-100 or PRESET_UNSET
+    int     contrast;   // 0-100 or PRESET_UNSET
+    bool    scanned;
 } MonPresetInfo;
 
 extern MonPresetInfo gMonPresets[MAX_VCP14_VALS];
@@ -34,15 +35,17 @@ extern int           gMonPresetCount; // number of valid entries in gMonPresets[
 // Human-readable labels.
 const wchar_t* GetVcp14Label(BYTE code);
 const wchar_t* GetVcpE2Label(BYTE code);
+const wchar_t* FormatPresetLabel(BYTE vcpCode, BYTE vcpValue); // e.g. "VCP E2:0E"
 
 // Read the current VCP 0xF0 value from the primary monitor (GET only, non-destructive).
 // Returns the raw VCP code (e.g. 0x0C for ComfortView) or PRESET_UNSET on failure.
 int  DisplayReadCurrentPreset(void);  // VCP 0xE2 picture mode
-bool DisplayIsInited(void);  // true after DisplayInit()
+bool   DisplayIsInited(void);      // true after DisplayInit()
+HANDLE DisplayGetPrimaryHandle(void); // opens+returns primary physical monitor handle (caller must NOT destroy)
 
 // Add vcpCode to gMonPresets[] if not already present.
 // Returns true if a new entry was added, false if it was already there.
-bool DisplayRecordProfile(int vcpCode);
+bool DisplayRecordProfile(int vcpReg, int vcpCode); // vcpReg=register (e.g.0xE2), vcpCode=value
 
 // -----------------------------------------------------------------------
 //  Public API

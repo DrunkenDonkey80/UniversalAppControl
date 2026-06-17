@@ -131,24 +131,30 @@ void LoadMonPresets(void) {
         wchar_t val[256] = {0};
         if (!GetPrivateProfileStringW(L"MonitorPresets", k, L"",
                                       val, _countof(val), path) || !val[0]) continue;
-        unsigned code = 0;
-        // Use return value to detect malformed keys; code==0 is valid (Custom Color)
-        if (swscanf_s(k, L"%X", &code) != 1) continue;
-        if (code > 255 || gMonPresetCount >= MAX_VCP14_VALS) continue;
+        // Key format: "RRCC" where RR=vcpReg hex, CC=vcpCode hex (e.g. "E20E")
+        // Legacy format was just "CC" (2 chars) — detect by key length
+        unsigned reg = 0xE2, code = 0; // default reg for legacy entries
+        size_t klen = wcslen(k);
+        if (klen == 4) {
+            if (swscanf_s(k, L"%02X%02X", &reg, &code) != 2) continue;
+        } else {
+            if (swscanf_s(k, L"%X", &code) != 1) continue;
+        }
+        if (code > 255 || reg > 255 || gMonPresetCount >= MAX_VCP14_VALS) continue;
         int i = gMonPresetCount++;
         memset(&gMonPresets[i], 0, sizeof(gMonPresets[i]));
+        gMonPresets[i].vcpReg     = (BYTE)reg;
         gMonPresets[i].vcpCode    = (BYTE)code;
         gMonPresets[i].brightness = PRESET_UNSET;
         gMonPresets[i].contrast   = PRESET_UNSET;
-        // Parse "Name|B|C" (B/C are legacy from old scan; keep for compat)
+        // Parse legacy "Name|B|C" value format
         wchar_t tmp[256]; wcscpy_s(tmp, _countof(tmp), val);
         wchar_t* ctx = NULL;
         wchar_t* name = wcstok_s(tmp, L"|", &ctx);
         wchar_t* bStr = wcstok_s(NULL, L"|", &ctx);
         wchar_t* cStr = wcstok_s(NULL, L"|", &ctx);
-        // Always use code-based label so name reflects the register value (e.g. "Profile 0E")
         (void)name;
-        wcscpy_s(gMonPresets[i].name, 64, GetVcpE2Label((BYTE)code));
+        wcscpy_s(gMonPresets[i].name, 64, FormatPresetLabel((BYTE)reg, (BYTE)code));
         if (bStr && bStr[0]) gMonPresets[i].brightness = _wtoi(bStr);
         if (cStr && cStr[0]) gMonPresets[i].contrast   = _wtoi(cStr);
         gMonPresets[i].scanned = (bStr && bStr[0]);
@@ -186,15 +192,19 @@ void SaveConfig(void) {
         if (gPresets[i].ProfileMode != PRESET_UNSET) {
             swprintf_s(tmp, _countof(tmp), L"%d", gPresets[i].ProfileMode);
             WritePrivateProfileStringW(section, L"ProfileMode", tmp, path);
+            if (gPresets[i].ProfileModeVcp > 0) {
+                swprintf_s(tmp, _countof(tmp), L"%02X", (BYTE)gPresets[i].ProfileModeVcp);
+                WritePrivateProfileStringW(section, L"ProfileModeVcp", tmp, path);
+            }
         }
     }
 
     // Write monitor preset entries (must come after DeleteFileW above)
     for (int i = 0; i < gMonPresetCount; i++) {
         wchar_t key[8], val[128];
-        swprintf_s(key, _countof(key), L"%02X", gMonPresets[i].vcpCode);
-        swprintf_s(val, _countof(val), L"%s|%d|%d",
-                   gMonPresets[i].name,
+        // Key = "RRCC" (4 hex chars): vcpReg + vcpCode so same value on different registers is distinct
+        swprintf_s(key, _countof(key), L"%02X%02X", gMonPresets[i].vcpReg, gMonPresets[i].vcpCode);
+        swprintf_s(val, _countof(val), L"%d|%d",
                    gMonPresets[i].brightness,
                    gMonPresets[i].contrast);
         WritePrivateProfileStringW(L"MonitorPresets", key, val, path);

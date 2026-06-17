@@ -623,10 +623,10 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 SS_LEFT, ex, ey+5, 90, 18, 0);
             {
                 HWND prCb = MakeChild(wnd, L"COMBOBOX", L"",
-                    CBS_DROPDOWNLIST|WS_VSCROLL, ex+94, ey, ew-94-70, 200, IDC_PE_PROFILE);
+                    CBS_DROPDOWNLIST|WS_VSCROLL, ex+94, ey, ew-94-110, 200, IDC_PE_PROFILE);
                 BuildProfileCombo(prCb);
             }
-            MakeBtn(wnd, L"Scan", ex+ew-66, ey, 66, 26, IDC_PE_SCAN);
+            MakeBtn(wnd, L"Record current", ex+ew-106, ey, 106, 26, IDC_PE_SCAN);
             ey += 32;
 
             // Separator: override controls below apply AFTER the profile
@@ -766,12 +766,36 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                 }
             }
             if (id == IDC_PE_SCAN && code == BN_CLICKED) {
-                if (!gScanInProgress) {
-                    EnableWindow(GetDlgItem(wnd, IDC_PE_SCAN), FALSE);
-                    SetDlgItemTextW(wnd, IDC_PE_SCAN, L"Scanning...");
-                    gScanNotifyHwnd = wnd;
-                    Job js = { JOB_SCAN_PRESETS, 0 };
-                    JobQueuePush(js);
+                // Read the current VCP 0xF0 value (GET only — never changes anything).
+                HCURSOR hOld = SetCursor(LoadCursorW(NULL, IDC_WAIT));
+                int vcpCode = DisplayReadCurrentVcpF0();
+                SetCursor(hOld);
+                if (vcpCode == PRESET_UNSET) {
+                    MessageBoxW(wnd,
+                        L"Could not read the monitor's current profile.\n"
+                        L"Make sure DDC/CI is enabled in the monitor OSD.",
+                        APPNAME, MB_OK | MB_ICONWARNING);
+                } else {
+                    bool added = DisplayRecordProfile(vcpCode);
+                    if (!added) {
+                        // Already recorded — just show which one it is
+                        wchar_t msg[128];
+                        swprintf_s(msg, _countof(msg),
+                            L"'%s' (0x%02X) is already in the list.",
+                            GetVcpF0Label((BYTE)vcpCode), (BYTE)vcpCode);
+                        MessageBoxW(wnd, msg, APPNAME, MB_OK | MB_ICONINFORMATION);
+                    } else {
+                        SaveMonPresets();
+                        BuildProfileCombo(GetDlgItem(wnd, IDC_PE_PROFILE));
+                        // Select the newly added entry
+                        HWND cb = GetDlgItem(wnd, IDC_PE_PROFILE);
+                        int cnt = ComboBox_GetCount(cb);
+                        for (int i = 0; i < cnt; i++) {
+                            if ((int)SendMessage(cb, CB_GETITEMDATA, i, 0) == vcpCode) {
+                                ComboBox_SetCurSel(cb, i); break;
+                            }
+                        }
+                    }
                 }
             }
             if (id == IDC_PE_OK && code == BN_CLICKED) {
@@ -782,14 +806,6 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
             if (id == IDC_PE_CANCEL && code == BN_CLICKED) {
                 DestroyWindow(wnd);
             }
-            return 0;
-        }
-        case WM_APP + 42: {
-            // Scan complete: rebuild profile combo with new names/B/C, re-enable button
-            SaveMonPresets();
-            BuildProfileCombo(GetDlgItem(wnd, IDC_PE_PROFILE));
-            SetDlgItemTextW(wnd, IDC_PE_SCAN, L"Scan");
-            EnableWindow(GetDlgItem(wnd, IDC_PE_SCAN), TRUE);
             return 0;
         }
         case WM_HSCROLL: {

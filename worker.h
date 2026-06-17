@@ -7,8 +7,7 @@ typedef enum {
     JOB_TOGGLE_HOTKEY   = 1,
     JOB_RELOAD_CONFIG,
     JOB_SHUTDOWN,
-    JOB_APPLY_DISPLAY,      // apply / reconcile monitor preset
-    JOB_SCAN_PRESETS         // probe all VCP 0xF0 codes and build name+B/C table
+    JOB_APPLY_DISPLAY        // apply / reconcile monitor preset
 } JobType;
 
 typedef struct { JobType type; int hotkeyIndex; } Job;

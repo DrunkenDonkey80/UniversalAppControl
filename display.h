@@ -31,16 +31,17 @@ typedef struct {
 
 extern MonPresetInfo gMonPresets[MAX_VCP14_VALS];
 extern int           gMonPresetCount; // number of valid entries in gMonPresets[]
-extern volatile bool gScanInProgress; // true while JOB_SCAN_PRESETS is running
-
 // Human-readable labels.
 const wchar_t* GetVcp14Label(BYTE code);
-const wchar_t* GetVcpF0Label(BYTE code); // fallback name for VCP 0xF0 code
+const wchar_t* GetVcpF0Label(BYTE code);
 
-// Probe every VCP 0xF0 code: set it, wait, read B/C, restore original.
-// notifyWnd: PostMessage(notifyWnd, WM_APP+42, 0, 0) when done (may be NULL).
-// Must run on the worker thread (I2C / DDC-CI).
-void DisplayScanPresets(HWND notifyWnd);
+// Read the current VCP 0xF0 value from the primary monitor (GET only, non-destructive).
+// Returns the raw VCP code (e.g. 0x0C for ComfortView) or PRESET_UNSET on failure.
+int DisplayReadCurrentVcpF0(void);
+
+// Add vcpCode to gMonPresets[] if not already present.
+// Returns true if a new entry was added, false if it was already there.
+bool DisplayRecordProfile(int vcpCode);
 
 // -----------------------------------------------------------------------
 //  Public API

@@ -127,25 +127,40 @@ void SaveMonPresets(void) {
     }
 }
 
-// Load previously-scanned preset table into gMonPresets[].
+// Load previously-recorded preset list from INI into gMonPresets[].
+// Builds the array from scratch; each key is a 2-char hex VCP code.
 void LoadMonPresets(void) {
     const wchar_t* path = GetConfigPath();
-    for (int i = 0; i < gMonPresetCount; i++) {
-        if (!gMonPresets[i].vcpCode) continue;
-        wchar_t key[8], val[256];
-        swprintf_s(key, _countof(key), L"%02X", gMonPresets[i].vcpCode);
-        if (GetPrivateProfileStringW(L"MonitorPresets", key, L"",
-                                     val, _countof(val), path) > 0 && val[0]) {
-            // Parse "Name|B|C"
-            wchar_t* ctx = NULL;
-            wchar_t* name = wcstok_s(val, L"|", &ctx);
-            wchar_t* bStr = wcstok_s(NULL, L"|", &ctx);
-            wchar_t* cStr = wcstok_s(NULL, L"|", &ctx);
-            if (name && name[0]) wcscpy_s(gMonPresets[i].name, 64, name);
-            if (bStr) { int b = _wtoi(bStr); gMonPresets[i].brightness = b; }
-            if (cStr) { int c = _wtoi(cStr); gMonPresets[i].contrast   = c; }
-            gMonPresets[i].scanned = (bStr != NULL);
-        }
+    // Enumerate all keys in [MonitorPresets]
+    wchar_t keys[2048] = {0};
+    GetPrivateProfileStringW(L"MonitorPresets", NULL, L"",
+                             keys, _countof(keys), path);
+    gMonPresetCount = 0;
+    for (wchar_t* k = keys; *k; k += wcslen(k) + 1) {
+        wchar_t val[256] = {0};
+        if (!GetPrivateProfileStringW(L"MonitorPresets", k, L"",
+                                      val, _countof(val), path) || !val[0]) continue;
+        unsigned code = 0;
+        swscanf_s(k, L"%X", &code);
+        if (!code || code > 255 || gMonPresetCount >= MAX_VCP14_VALS) continue;
+        int i = gMonPresetCount++;
+        memset(&gMonPresets[i], 0, sizeof(gMonPresets[i]));
+        gMonPresets[i].vcpCode    = (BYTE)code;
+        gMonPresets[i].brightness = PRESET_UNSET;
+        gMonPresets[i].contrast   = PRESET_UNSET;
+        // Parse "Name|B|C" (B/C are legacy from old scan; keep for compat)
+        wchar_t tmp[256]; wcscpy_s(tmp, _countof(tmp), val);
+        wchar_t* ctx = NULL;
+        wchar_t* name = wcstok_s(tmp, L"|", &ctx);
+        wchar_t* bStr = wcstok_s(NULL, L"|", &ctx);
+        wchar_t* cStr = wcstok_s(NULL, L"|", &ctx);
+        if (name && name[0])
+            wcscpy_s(gMonPresets[i].name, 64, name);
+        else
+            wcscpy_s(gMonPresets[i].name, 64, GetVcpF0Label((BYTE)code));
+        if (bStr && bStr[0]) gMonPresets[i].brightness = _wtoi(bStr);
+        if (cStr && cStr[0]) gMonPresets[i].contrast   = _wtoi(cStr);
+        gMonPresets[i].scanned = (bStr && bStr[0]);
     }
 }
 

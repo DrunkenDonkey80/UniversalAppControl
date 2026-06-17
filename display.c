@@ -507,8 +507,10 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
     DWORD vcp14Orig = 0;
     DWORD vcpF0Orig = 0;
 
-    // Profile Mode (VCP 0xF0) — applied FIRST so B/C/CT override preset defaults
-    if (preset->ProfileMode != PRESET_UNSET) {
+    // Profile Mode (VCP 0xF0) — applied FIRST so B/C/CT override preset defaults.
+    // Code 0x00 = monitor's "Custom Color" read-state; writing 0x00 is undefined/destructive
+    // on many monitors (can trigger a factory reset or input switch). Skip it on write.
+    if (preset->ProfileMode != PRESET_UNSET && (BYTE)preset->ProfileMode != 0x00) {
         BYTE want = (BYTE)preset->ProfileMode;
         bool skip = !force && ((int)want == gLastApplied.pm);
         if (skip) {
@@ -518,7 +520,8 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
             __try { got = GetVCPFeatureAndVCPFeatureReply(h, 0xF0, &fType, &fCur, &fMax); }
             __except(EXCEPTION_EXECUTE_HANDLER) { }
             if (got) {
-                if (firstTouch && fCur) vcpF0Orig = fCur;
+                // Save original even if fCur==0 (custom color state)
+                if (firstTouch) vcpF0Orig = fCur;
                 if (force || (BYTE)fCur != want) {
                     BOOL setOk=FALSE;
                     __try { setOk = SetVCPFeature(h, 0xF0, want); anySet = true; }
@@ -614,7 +617,7 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
             if (bMax > bMin) { gPrim.bMin=bMin; gPrim.bOrig=bOrig; gPrim.bMax=bMax; }
             if (cMax > cMin) { gPrim.cMin=cMin; gPrim.cOrig=cOrig; gPrim.cMax=cMax; }
             if (vcp14Orig)    gPrim.origVcp14  = vcp14Orig;
-            if (vcpF0Orig)    gPrim.origVcpF0  = vcpF0Orig;
+            gPrim.origVcpF0  = vcpF0Orig;  // store even if 0 (custom color state)
             gPrim.hasSnapshot = true;
         }
         LeaveCriticalSection(&gMonLock);
@@ -643,7 +646,8 @@ void DisplayRestoreAll(void) {
 
     HANDLE h = pm[0].hPhysicalMonitor;
     // Restore preset mode first, then B/C/CT on top
-    if (snap.origVcpF0)        SetVCPFeature(h, 0xF0,  snap.origVcpF0);
+    // Only restore if original was a real settable preset (>0); 0 = custom/manual, not writable
+    if (snap.origVcpF0 > 0)    SetVCPFeature(h, 0xF0,  snap.origVcpF0);
     if (snap.origVcp14)        SetVCPFeature(h, 0x14,  snap.origVcp14);
     if (snap.bMax > snap.bMin) SetMonitorBrightness(h, snap.bOrig);
     if (snap.cMax > snap.cMin) SetMonitorContrast(h,   snap.cOrig);

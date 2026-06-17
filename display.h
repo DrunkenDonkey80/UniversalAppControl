@@ -40,7 +40,8 @@ const wchar_t* FormatPresetLabel(BYTE vcpCode, BYTE vcpValue); // e.g. "VCP E2:0
 // Read the current VCP 0xF0 value from the primary monitor (GET only, non-destructive).
 // Returns the raw VCP code (e.g. 0x0C for ComfortView) or PRESET_UNSET on failure.
 int  DisplayReadCurrentPreset(void);  // VCP 0xE2 picture mode
-bool   DisplayIsInited(void);      // true after DisplayInit()
+bool   DisplayIsInited(void);
+void   DisplayPopulatePresetsFromCaps(void); // fill gMonPresets from capabilities VCP list
 HANDLE DisplayGetPrimaryHandle(void); // opens+returns primary physical monitor handle (caller must NOT destroy)
 
 // Add vcpCode to gMonPresets[] if not already present.

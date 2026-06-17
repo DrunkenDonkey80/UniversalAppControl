@@ -809,16 +809,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			}
 			LeaveCriticalSection(&gHotkeyLock);
 
-			// Suppress hotkeys while the user is typing in the hotkey edit box
-			if (matchIndex >= 0 && gSettingsWnd) {
-				GUITHREADINFO gti = { sizeof(gti) };
-				DWORD settingsTid = GetWindowThreadProcessId(gSettingsWnd, NULL);
-				if (GetGUIThreadInfo(settingsTid, &gti)) {
-					HWND hkEdit = GetDlgItem(gSettingsWnd, IDC_HOTKEY);
-					if (hkEdit && gti.hwndFocus == hkEdit)
-						matchIndex = -1; // pretend no hotkey matched
-				}
-			}
+			// Suppress hotkeys while the hotkey edit box has focus.
+			// gHotkeyEditActive is set/cleared by the subclass WM_SETFOCUS/WM_KILLFOCUS —
+			// no cross-thread calls needed here (LL hooks must not block).
+			if (matchIndex >= 0 && gHotkeyEditActive)
+				matchIndex = -1;
 
 			if (matchIndex >= 0) {
 				if (down && !gHotkeyHeld[matchIndex]) {
@@ -963,8 +958,9 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 
 	InitializeCriticalSection(&gHotkeyLock);
 	WorkerInit();
-	DisplayInit();   // must be called before worker thread starts
-	LoadMonPresets();// restore previously-scanned preset names/B/C
+	DisplayInit();                    // must be called before worker thread starts
+	LoadMonPresets();                 // restore previously-saved preset names
+	DisplayPopulatePresetsFromCaps(); // add any E2 entries the monitor advertises that aren't in INI yet
 	CrashLog("[main] DisplayInit done\n");
 	workerThread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, NULL);
 	if (workerThread == NULL) {

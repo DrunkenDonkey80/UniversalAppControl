@@ -116,6 +116,7 @@ static LRESULT HandleCtlColor(UINT msg, WPARAM wp, LPARAM lp) {
 
 // ---- Settings window ----
 HWND gSettingsWnd = NULL;
+volatile BOOL gHotkeyEditActive = FALSE; // TRUE while hotkey edit has focus; read from LL hook
 static int gSelected = -1;
 
 static LRESULT CALLBACK SettingsProc(HWND, UINT, WPARAM, LPARAM);
@@ -267,7 +268,10 @@ static LRESULT CALLBACK HotkeyEditSubclass(HWND hWnd, UINT msg, WPARAM wp, LPARA
         case WM_CHAR:
         case WM_SYSCHAR:
             return 0;
+        case WM_SETFOCUS:    gHotkeyEditActive = TRUE;  break;
+        case WM_KILLFOCUS:   gHotkeyEditActive = FALSE; break;
         case WM_NCDESTROY:
+            gHotkeyEditActive = FALSE;
             RemoveWindowSubclass(hWnd, HotkeyEditSubclass, 0);
             break;
     }

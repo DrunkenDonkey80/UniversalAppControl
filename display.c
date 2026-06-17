@@ -356,9 +356,22 @@ void DisplayInit(void) {
     }
 
     DestroyPhysicalMonitors(n, pm);
-    // gMonPresets[] is populated from INI by LoadMonPresets() after this returns.
-    CrashLog("[display] Init done: caps=0x%08lX vcp14Count=%d vcpF0Count=%d\n",
+    CrashLog("[display] Init done: caps=0x%08lX vcp14Count=%d vcpE2Count=%d\n",
              gPrim.caps, gPrimaryVcp14Count, gPrimaryVcpE2Count);
+}
+
+// Populate gMonPresets[] from the capabilities-string VCP codes discovered during
+// DisplayInit (gPrimaryVcpE2Vals).  Called once after LoadMonPresets() so that INI
+// entries loaded first are not re-added.  This means the combo is always pre-filled
+// with every mode the monitor advertises — no Capture button needed.
+void DisplayPopulatePresetsFromCaps(void) {
+    if (gPrimaryVcpE2Count <= 0) return;
+    for (int i = 0; i < gPrimaryVcpE2Count; i++) {
+        BYTE code = gPrimaryVcpE2Vals[i];
+        DisplayRecordProfile(0xE2, (int)code);
+    }
+    CrashLog("[display] PopulatePresetsFromCaps: %d E2 entries -> gMonPresetCount=%d\n",
+             gPrimaryVcpE2Count, gMonPresetCount);
 }
 
 void DisplayRefresh(void) {

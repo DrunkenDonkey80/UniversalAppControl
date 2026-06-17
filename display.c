@@ -534,10 +534,24 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
     DWORD vcp14Orig = 0;
     DWORD vcpE2Orig = 0;
 
-    // Picture-mode preset — use the VCP register stored alongside the value.
-    // ProfileModeVcp=0 means preset was captured with an old version; skip gracefully.
-    if (preset->ProfileMode != PRESET_UNSET && preset->ProfileModeVcp > 0) {
-        BYTE vcp  = (BYTE)preset->ProfileModeVcp;
+    // Picture-mode preset.
+    // ProfileModeVcp=0 means captured before VCP tracking was added; probe the
+    // standard candidates at apply-time to find the right register automatically.
+    if (preset->ProfileMode != PRESET_UNSET) {
+        BYTE vcp  = (preset->ProfileModeVcp > 0) ? (BYTE)preset->ProfileModeVcp : 0;
+        if (vcp == 0) {
+            // Auto-discover which register to use (same logic as capture)
+            static const BYTE kApplyCands[] = { 0xE2, 0xDC, 0x14 };
+            for (int ci = 0; ci < 3; ci++) {
+                DWORD vt2=0, vc2=0, vm2=0; BOOL ok2=FALSE;
+                __try { ok2 = GetVCPFeatureAndVCPFeatureReply(h, kApplyCands[ci], &vt2, &vc2, &vm2); }
+                __except(EXCEPTION_EXECUTE_HANDLER) { ok2=FALSE; }
+                if (ok2 && vm2 > 1) { vcp = kApplyCands[ci]; break; }
+            }
+        }
+        if (vcp == 0) goto skip_preset; // no usable register found
+        // ProfileMode=0 with ProfileModeVcp=0 = legacy uncaptured value; skip
+        if (preset->ProfileMode == 0 && preset->ProfileModeVcp == 0) goto skip_preset;
         BYTE want = (BYTE)preset->ProfileMode;
         bool skip = !force && ((int)want == gLastApplied.pm);
         if (skip) {
@@ -561,6 +575,7 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
             }
         }
     }
+    skip_preset:;
 
     // Brightness
     if (preset->Brightness != PRESET_UNSET && (caps & MC_CAPS_BRIGHTNESS)) {

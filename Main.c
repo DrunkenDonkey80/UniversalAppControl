@@ -286,7 +286,9 @@ static bool ReadConfig() {
 			}
 			gNumPresets++;
 		}
-		else if (wcsncmp(sectionName, L"preset:", 7) != 0 && gNumProfiles < MAX_PROFILES) {
+		else if (wcsncmp(sectionName, L"preset:", 7) != 0
+		      && lstrcmpiW(sectionName, L"MonitorPresets") != 0
+		      && gNumProfiles < MAX_PROFILES) {
 			//profile
 			RegisterConfigHotkey(sectionName, L"Hotkey", gNumProfiles);
 

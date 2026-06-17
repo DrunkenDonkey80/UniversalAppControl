@@ -361,9 +361,12 @@ static void ApplyFieldsToSelection(HWND wnd) {
 
     wchar_t hk[64]; GetDlgItemTextW(wnd, IDC_HOTKEY, hk, _countof(hk));
     u32 vk = 0; UINT mods = 0;
-    if (hk[0] && ParseHotkey(hk, &vk, &mods)) {
+    if (!hk[0]) {
+        // Empty box = user cleared the hotkey
+        p->HotKey = 0; p->HotKeyModifiers = 0;
+    } else if (ParseHotkey(hk, &vk, &mods)) {
         p->HotKey = vk; p->HotKeyModifiers = mods;
-    } else if (hk[0]) {
+    } else {
         MessageBoxW(wnd, L"Invalid hotkey. Example: Ctrl+Alt+V", APPNAME, MB_OK | MB_ICONWARNING);
         FormatHotkey(p->HotKey, p->HotKeyModifiers, hk, _countof(hk));
         SetDlgItemTextW(wnd, IDC_HOTKEY, hk);

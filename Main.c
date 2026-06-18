@@ -792,14 +792,17 @@ void HandleProfile(int profileId, bool trigger) {
 			// If we suspend before that finishes, the game can no longer drive
 			// the mode-switch and its last frame stays painted on screen.
 			//
-			// Two-step nudge:
-			//   1. Hand foreground to the shell / desktop so DWM has a clear
-			//      reason to recompose without the game's surface on top.
-			//   2. Sleep long enough for at least a few frames at 60Hz
-			//      (16.7 ms each).  300 ms is imperceptible to the user but
-			//      comfortably covers the worst-case FSE mode-switch.
-			HWND shell = GetShellWindow();
-			if (shell) SetForegroundWindow(shell);
+			// 300 ms covers ~18 frames at 60 Hz and comfortably handles the
+			// worst-case fullscreen-exclusive mode-switch (~100-200 ms).
+			// Imperceptible to the user.
+			//
+			// We deliberately do NOT call SetForegroundWindow(shell) here:
+			// handing foreground to Progman / WorkerW makes the shell refresh
+			// its taskbar tracking, which can re-register the just-hidden game
+			// as a taskbar button instead of dropping it.  Letting Windows
+			// auto-pick the next-Z-order window as the new foreground (which
+			// it does as soon as ShowWindow(SW_HIDE) returns) avoids that and
+			// still leaves the taskbar entry correctly removed.
 			Sleep(300);
 
 			bool sOk = SuspendProcess(pid);

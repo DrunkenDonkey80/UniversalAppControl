@@ -561,33 +561,29 @@ static const BYTE kF0Defaults[] = {
 static const int kF0DefaultCount = (int)(sizeof(kF0Defaults) / sizeof(kF0Defaults[0]));
 
 void DisplayPopulatePresetsFromCaps(void) {
-    // Strip stale E2 entries from INI (E2 writes are silently ignored —
-    // these entries appeared in old INIs from buggy versions).
+    // Strip stale E2 entries from INI (E2 writes silently ignored — useless).
     int kept = 0;
     for (int i = 0; i < gMonPresetCount; i++) {
         if (gMonPresets[i].vcpReg != 0xE2)
             gMonPresets[kept++] = gMonPresets[i];
-        else
-            CrashLog("[display] Populate: dropping stale E2:%02X\n", gMonPresets[i].vcpCode);
     }
     gMonPresetCount = kept;
 
-    // Populate from F0 capabilities.
+    // F0 is a command register: writes change the visible mode but reads are
+    // unreliable.  Capabilities advertise a subset of valid F0 codes but Dell
+    // monitors are known to accept (and react to) codes outside that subset.
+    // Strategy: populate the FULL 0x00..0xFF range as F0 commands so the user
+    // can experiment.  Each entry's effect is logged via the E2 readback in
+    // DdcciSetFeatureVerified, so the crash log doubles as a discovery record.
     //
-    // F0 is a write-trigger register on this hardware: writes DO change the
-    // visible mode, but reads return 0x00 unless the previous mode change
-    // came through F0 itself (OSD changes don't update F0).  So Capture is
-    // useless for F0 — the only reliable source for the F0 mode list is the
-    // capabilities-string F0(...) block parsed at DisplayInit.
-    if (gPrimaryVcpF0Count > 0) {
-        for (int i = 0; i < gPrimaryVcpF0Count; i++)
-            DisplayRecordProfile(0xF0, (int)gPrimaryVcpF0Vals[i]);
-        CrashLog("[display] Populate: %d F0 entries from caps\n", gPrimaryVcpF0Count);
-    } else {
-        CrashLog("[display] Populate: no F0(...) block in caps; combo will be empty\n");
+    // Entries already in gMonPresets (loaded from INI — e.g. user-renamed ones)
+    // are kept as-is; DisplayRecordProfile no-ops on duplicates.
+    for (int v = 0x00; v <= 0xFF; v++) {
+        DisplayRecordProfile(0xF0, v);
     }
+    CrashLog("[display] Populate: F0 full 0x00..0xFF range -> %d total entries\n",
+             gMonPresetCount);
     SaveMonPresets();
-    CrashLog("[display] Populate done: %d entries total\n", gMonPresetCount);
 }
 
 void DisplayRefresh(void) {

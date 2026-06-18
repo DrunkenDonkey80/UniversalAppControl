@@ -4,7 +4,7 @@
 #include "Main.h"
 
 #define MAX_PHYSICAL_PER_HMONITOR 8
-#define MAX_VCP14_VALS            64
+#define MAX_VCP14_VALS            300  // hold full F0 experiment range (256) + headroom
 
 // -----------------------------------------------------------------------
 //  Supported VCP 0x14 color-preset codes for the primary monitor.

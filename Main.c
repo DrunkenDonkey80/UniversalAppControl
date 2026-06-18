@@ -22,6 +22,7 @@
 #include "settings_ui.h"
 #include "install.h"
 #include "selftest.h"
+#include "display.h"
 
 _NtSuspendProcess NtSuspendProcess;
 _NtResumeProcess NtResumeProcess;
@@ -31,6 +32,14 @@ CONFIG gConfig;
 
 PROFILE_CONFIG gProfiles[MAX_PROFILES];
 int gNumProfiles = 0;
+
+DISPLAY_PRESET gPresets[MAX_PRESETS];
+int            gNumPresets = 0;
+BOOL           gDisplayControlEnabled = FALSE;
+wchar_t        gDefaultPresetName[MAX_NAME] = L"Default";
+
+DesiredDisplay gDesiredDisplay;   // guarded by gHotkeyLock
+HWND           gScanNotifyHwnd = NULL;
 
 typedef struct _HotkeyInfo
 {
@@ -221,6 +230,10 @@ static bool ReadConfig() {
 	UnregisterHotkeys();
 	memset(gProfiles, 0, sizeof(gProfiles));
 	gNumProfiles = 0;
+	memset(gPresets, 0, sizeof(gPresets));
+	gNumPresets = 0;
+	gDisplayControlEnabled = FALSE;
+	wcscpy_s(gDefaultPresetName, MAX_NAME, L"Default");
 
 	// Maximum buffer size for section names
 	wchar_t buffer[32767] = { 0 };
@@ -239,22 +252,66 @@ static bool ReadConfig() {
 	while (*sectionName) {
 		if (!lstrcmpi(sectionName, L"general")) {
 			gConfig.Debug = ReadConfigBool(sectionName, L"Debug", false);
-
 			if (gConfig.Debug)
 				EnableDebugConsole();
-
+			gDisplayControlEnabled = ReadConfigBool(sectionName, L"DisplayControl", false);
+			ReadConfigString(sectionName, L"DefaultPreset", gDefaultPresetName);
+			if (!gDefaultPresetName[0])
+				wcscpy_s(gDefaultPresetName, MAX_NAME, L"Default");
 		}
-		else if (gNumProfiles < MAX_PROFILES) {
+		else if (wcsncmp(sectionName, L"preset:", 7) == 0 && gNumPresets < MAX_PRESETS) {
+			// --- Display preset section ---
+			const wchar_t* presetName = sectionName + 7;  // skip "preset:"
+			wcscpy_s(gPresets[gNumPresets].Name, MAX_NAME, presetName);
+			// Read raw values; -1 sentinel means unset
+			wchar_t tmp[64] = { 0 };
+			gPresets[gNumPresets].Brightness = PRESET_UNSET;
+			gPresets[gNumPresets].Contrast   = PRESET_UNSET;
+			gPresets[gNumPresets].ColorTemp   = PRESET_UNSET;
+			gPresets[gNumPresets].ProfileMode = PRESET_UNSET;
+			if (GetPrivateProfileStringW(sectionName, L"Brightness", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
+				gPresets[gNumPresets].Brightness = _wtoi(tmp);
+			memset(tmp, 0, sizeof(tmp));
+			if (GetPrivateProfileStringW(sectionName, L"Contrast", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
+				gPresets[gNumPresets].Contrast = _wtoi(tmp);
+			memset(tmp, 0, sizeof(tmp));
+			if (GetPrivateProfileStringW(sectionName, L"ColorTemp", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
+				gPresets[gNumPresets].ColorTemp = _wtoi(tmp);
+			if (GetPrivateProfileStringW(sectionName, L"ProfileMode", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0])
+				gPresets[gNumPresets].ProfileMode = _wtoi(tmp);
+			if (GetPrivateProfileStringW(sectionName, L"ProfileModeVcp", L"", tmp, _countof(tmp), iniFilePath) > 0 && tmp[0]) {
+				unsigned vcpHex = 0;
+				swscanf_s(tmp, L"%X", &vcpHex);
+				gPresets[gNumPresets].ProfileModeVcp = (int)vcpHex;
+			}
+			gNumPresets++;
+		}
+		else if (wcsncmp(sectionName, L"preset:", 7) != 0
+		      && lstrcmpiW(sectionName, L"MonitorPresets") != 0
+		      && gNumProfiles < MAX_PROFILES) {
 			//profile
 			RegisterConfigHotkey(sectionName, L"Hotkey", gNumProfiles);
 
-			gProfiles[gNumProfiles].HideEnabled = ReadConfigBool(sectionName, L"Hide", false);
-			gProfiles[gNumProfiles].PauseEnabled = ReadConfigBool(sectionName, L"Pause", false);
-			gProfiles[gNumProfiles].MinimizeEnabled = ReadConfigBool(sectionName, L"Minimize", false);
+			// Load Operation (new) or derive from legacy Hide/Pause/Min bools
+			wchar_t opTmp[16] = {0};
+			if (GetPrivateProfileStringW(sectionName, L"Operation", L"", opTmp, _countof(opTmp), iniFilePath) > 0 && opTmp[0]) {
+				gProfiles[gNumProfiles].Operation = _wtoi(opTmp);
+			} else {
+				bool h = ReadConfigBool(sectionName, L"Hide", false);
+				bool p = ReadConfigBool(sectionName, L"Pause", false);
+				bool m = ReadConfigBool(sectionName, L"Minimize", false);
+				gProfiles[gNumProfiles].Operation = p ? PROF_OP_PAUSE
+				    : h ? PROF_OP_HIDE : m ? PROF_OP_MINIMIZE : PROF_OP_NONE;
+			}
+			// Keep legacy fields in sync for code that still reads them
+			gProfiles[gNumProfiles].HideEnabled     = (gProfiles[gNumProfiles].Operation == PROF_OP_HIDE  || gProfiles[gNumProfiles].Operation == PROF_OP_PAUSE);
+			gProfiles[gNumProfiles].PauseEnabled    = (gProfiles[gNumProfiles].Operation == PROF_OP_PAUSE);
+			gProfiles[gNumProfiles].MinimizeEnabled = (gProfiles[gNumProfiles].Operation == PROF_OP_MINIMIZE);
 
 			ReadConfigString(sectionName, L"ProgramExeName", gProfiles[gNumProfiles].ProgramExeName);
 			ReadConfigString(sectionName, L"ProgramPath", gProfiles[gNumProfiles].ProgramPath);
 			ReadConfigList(sectionName, L"WindowNames", '|', &gProfiles[gNumProfiles].WindowNames, &gProfiles[gNumProfiles].NumWindows);
+			ReadConfigString(sectionName, L"DisplayPreset", gProfiles[gNumProfiles].DisplayPreset);
 
 			gNumProfiles++;
 		}
@@ -291,53 +348,144 @@ const wchar_t* GetLastErorText() {
 	return messageBuffer;
 }
 
-bool IsProcessSuspended(DWORD processId) {
-	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-	if (hSnapshot == INVALID_HANDLE_VALUE) {
-		//std::cerr << "Failed to create snapshot." << std::endl;
+// --- Kernel-data based suspend probe -----------------------------------------
+// Task Manager and Resource Monitor read process/thread state via
+// NtQuerySystemInformation(SystemProcessInformation). The kernel populates
+// a per-thread WaitReason; a thread frozen by NtSuspendProcess shows
+// WaitReason == Suspended (5). No OpenProcess / OpenThread needed, which is
+// why this works for anti-cheat / elevated processes that block per-handle
+// access.
+//
+// winternl.h has these structs but with most fields named "Reserved", so we
+// declare local copies under UAC_* names to access NumberOfThreads / Threads
+// / WaitReason cleanly. Layouts match what ntdll has used since XP and what
+// ProcessHacker / SystemInformer document.
+
+typedef struct _UAC_CLIENT_ID {
+	HANDLE UniqueProcess;
+	HANDLE UniqueThread;
+} UAC_CLIENT_ID;
+
+typedef struct _UAC_SYSTEM_THREAD_INFORMATION {
+	LARGE_INTEGER KernelTime;
+	LARGE_INTEGER UserTime;
+	LARGE_INTEGER CreateTime;
+	ULONG WaitTime;
+	PVOID StartAddress;
+	UAC_CLIENT_ID ClientId;
+	LONG Priority;
+	LONG BasePriority;
+	ULONG ContextSwitches;
+	ULONG ThreadState;   // 5 = Waiting
+	ULONG WaitReason;    // 5 = Suspended (when ThreadState==Waiting)
+} UAC_SYSTEM_THREAD_INFORMATION;
+
+typedef struct _UAC_SYSTEM_PROCESS_INFORMATION {
+	ULONG NextEntryOffset;
+	ULONG NumberOfThreads;
+	LARGE_INTEGER WorkingSetPrivateSize;
+	ULONG HardFaultCount;
+	ULONG NumberOfThreadsHighWatermark;
+	ULONGLONG CycleTime;
+	LARGE_INTEGER CreateTime;
+	LARGE_INTEGER UserTime;
+	LARGE_INTEGER KernelTime;
+	UNICODE_STRING ImageName;
+	LONG BasePriority;
+	HANDLE UniqueProcessId;
+	HANDLE InheritedFromUniqueProcessId;
+	ULONG HandleCount;
+	ULONG SessionId;
+	ULONG_PTR UniqueProcessKey;
+	SIZE_T PeakVirtualSize;
+	SIZE_T VirtualSize;
+	ULONG PageFaultCount;
+	SIZE_T PeakWorkingSetSize;
+	SIZE_T WorkingSetSize;
+	SIZE_T QuotaPeakPagedPoolUsage;
+	SIZE_T QuotaPagedPoolUsage;
+	SIZE_T QuotaPeakNonPagedPoolUsage;
+	SIZE_T QuotaNonPagedPoolUsage;
+	SIZE_T PagefileUsage;
+	SIZE_T PeakPagefileUsage;
+	SIZE_T PrivatePageCount;
+	LARGE_INTEGER ReadOperationCount;
+	LARGE_INTEGER WriteOperationCount;
+	LARGE_INTEGER OtherOperationCount;
+	LARGE_INTEGER ReadTransferCount;
+	LARGE_INTEGER WriteTransferCount;
+	LARGE_INTEGER OtherTransferCount;
+	UAC_SYSTEM_THREAD_INFORMATION Threads[1];   // flexible array, count = NumberOfThreads
+} UAC_SYSTEM_PROCESS_INFORMATION;
+
+#define UAC_KWaitReason_Suspended  5
+#define UAC_KThreadState_Waiting   5
+#ifndef STATUS_INFO_LENGTH_MISMATCH
+#define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
+#endif
+
+typedef NTSTATUS(NTAPI* _NtQuerySystemInformation)(
+	ULONG SystemInformationClass, PVOID SystemInformation,
+	ULONG SystemInformationLength, PULONG ReturnLength);
+static _NtQuerySystemInformation pNtQuerySystemInformation = NULL;
+#define UAC_SystemProcessInformation 5
+
+bool IsProcessSuspendedSys(u32 processId) {
+	if (processId == 0) return false;
+	if (!pNtQuerySystemInformation) {
+		HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+		if (!nt) return false;
+		pNtQuerySystemInformation = (_NtQuerySystemInformation)
+			GetProcAddress(nt, "NtQuerySystemInformation");
+		if (!pNtQuerySystemInformation) return false;
+	}
+
+	// Snapshot can grow between sizing call and fetch call, so retry on mismatch.
+	ULONG bufSize = 256 * 1024;
+	PVOID buf = NULL;
+	NTSTATUS st = STATUS_INFO_LENGTH_MISMATCH;
+	for (int tries = 0; tries < 6 && st == STATUS_INFO_LENGTH_MISMATCH; tries++) {
+		if (buf) HeapFree(GetProcessHeap(), 0, buf);
+		buf = HeapAlloc(GetProcessHeap(), 0, bufSize);
+		if (!buf) return false;
+		ULONG retLen = 0;
+		st = pNtQuerySystemInformation(UAC_SystemProcessInformation, buf, bufSize, &retLen);
+		if (st == STATUS_INFO_LENGTH_MISMATCH) bufSize = (retLen ? retLen + 64 * 1024 : bufSize * 2);
+	}
+	if (st != 0 /*STATUS_SUCCESS*/) {
+		if (buf) HeapFree(GetProcessHeap(), 0, buf);
+		CrashLog("[suspended?] NtQSI failed st=0x%08lX pid=%u\n", (unsigned long)st, processId);
 		return false;
 	}
 
-	THREADENTRY32 threadEntry;
-	threadEntry.dwSize = sizeof(THREADENTRY32);
-	bool isSuspended = true;  // Assume process is suspended unless proven otherwise
-
-	if (Thread32First(hSnapshot, &threadEntry)) {
-		do {
-			if (threadEntry.th32OwnerProcessID == processId) {
-				// Open the thread
-				HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION| THREAD_SUSPEND_RESUME, FALSE, threadEntry.th32ThreadID);
-				if (hThread) {
-					// Get the thread's suspend count
-					DWORD suspendCount = SuspendThread(hThread);
-					ResumeThread(hThread); // Undo the suspend caused by SuspendThread
-
-					if (suspendCount == 0) {
-						isSuspended = false; // At least one thread is not suspended
+	bool suspended = false;
+	UAC_SYSTEM_PROCESS_INFORMATION* p = (UAC_SYSTEM_PROCESS_INFORMATION*)buf;
+	for (;;) {
+		if ((u32)(uintptr_t)p->UniqueProcessId == processId) {
+			if (p->NumberOfThreads > 0) {
+				suspended = true;
+				for (ULONG i = 0; i < p->NumberOfThreads; i++) {
+					if (p->Threads[i].WaitReason != UAC_KWaitReason_Suspended) {
+						suspended = false;
+						break;
 					}
-					CloseHandle(hThread);
 				}
 			}
-		} while (Thread32Next(hSnapshot, &threadEntry) && isSuspended);
-	}
-	else {
-		//std::cerr << "Failed to retrieve thread information." << std::endl;
+			break;
+		}
+		if (p->NextEntryOffset == 0) break;
+		p = (UAC_SYSTEM_PROCESS_INFORMATION*)((u8*)p + p->NextEntryOffset);
 	}
 
-	CloseHandle(hSnapshot);
-	return isSuspended;
+	HeapFree(GetProcessHeap(), 0, buf);
+	return suspended;
 }
 
 bool SuspendProcess(u32 id) {
-	//do not suspend if already suspended
-	if (IsProcessSuspended(id)) {
-		return true;
-	}
-
 	HANDLE ProcessHandle = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, id);
-	if (ProcessHandle == NULL)
-	{
-		MsgBox(L"Failed to open process %d! Error 0x%08lx", APPNAME L" Error", MB_OK | MB_ICONERROR, id, GetLastError());
+	if (ProcessHandle == NULL) {
+		// Silent failure — NO MsgBox (would appear behind fullscreen game and freeze UAC)
+		CrashLog("[suspend] OpenProcess pid=%u FAILED err=0x%08lX\n", id, GetLastError());
 		return false;
 	}
 
@@ -372,14 +520,13 @@ bool ResumeProcess(u32 id) {
 		}
 	}
 	HANDLE ProcessHandle = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, id);
-	if (ProcessHandle == NULL)
-	{
-		MsgBox(L"Failed to open process %d! Error 0x%08lx", APPNAME L" Error", MB_OK | MB_ICONERROR, id, GetLastError());
+	if (ProcessHandle == NULL) {
+		CrashLog("[resume] OpenProcess pid=%u FAILED err=0x%08lX\n", id, GetLastError());
 		return false;
 	}
 	NtResumeProcess(ProcessHandle);
 	CloseHandle(ProcessHandle);
-	DbgPrint(L"Process resumed!");
+	CrashLog("[resume] pid=%u OK\n", id);
 	return true;
 }
 
@@ -420,7 +567,6 @@ void UpdateProcessIDs() {
 	HANDLE ProcessSnapshot = NULL;
 	PROCESSENTRY32W ProcessEntry = { sizeof(PROCESSENTRY32W) };
 
-	//walk over processes from config to get their names
 	for (int i = 0; i < gNumProfiles; i++) {
 		gProfiles[i].ProcessID = 0;
 	}
@@ -506,11 +652,12 @@ bool HideWindowForProfile(HWND hWnd, int profileId, HWND activeWindow) {
 		if (hWnd == activeWindow)
 			gProfiles[profileId].ForegroundWindow = hWnd;
 
-		if (gProfiles[profileId].HideEnabled && IsWindowVisible(hWnd)) {
+		int op = gProfiles[profileId].Operation;
+		if ((op == PROF_OP_HIDE || op == PROF_OP_PAUSE) && IsWindowVisible(hWnd)) {
 			ShowWindow(hWnd, SW_HIDE);
 			windowChanged = true;
 		}
-		else if (gProfiles[profileId].MinimizeEnabled && IsWindowVisible(hWnd) && !IsIconic(hWnd)) {
+		else if (op == PROF_OP_MINIMIZE && IsWindowVisible(hWnd) && !IsIconic(hWnd)) {
 			ShowWindow(hWnd, SW_MINIMIZE);
 			windowChanged = true;
 		}
@@ -535,7 +682,7 @@ bool HideWindowsForPofile(int profileId) {
 		}
 	}
 	else if (gProfiles[profileId].ProgramExeName[0] &&
-	         (gProfiles[profileId].HideEnabled || gProfiles[profileId].MinimizeEnabled)) {
+	         gProfiles[profileId].Operation != PROF_OP_NONE) {
 		for (int i = 0; i < gNumWindowInfo; i++) {
 			if (_wcsicmp(gWindowInfo[i].ExeName, gProfiles[profileId].ProgramExeName) == 0) {
 				if (HideWindowForProfile(gWindowInfo[i].WindowHandle, profileId, activeWindow))
@@ -580,16 +727,23 @@ bool RestoreWindowsForPofile(int profileId) {
 	for (int i = 0; i < gProfiles[profileId].NumHiddenWindows; i++) {
 		HWND hw = gProfiles[profileId].HiddenWindows[i];
 		if (!IsWindow(hw)) continue;
-		if (RestoreWindow(hw, gProfiles[profileId].HideEnabled, gProfiles[profileId].MinimizeEnabled))
+		int op_ = gProfiles[profileId].Operation;
+	if (RestoreWindow(hw, op_ == PROF_OP_HIDE || op_ == PROF_OP_PAUSE, op_ == PROF_OP_MINIMIZE))
 			windowChanged = true;
 		if (toFocus == NULL) toFocus = hw;
 		if (hw == gProfiles[profileId].ForegroundWindow) toFocus = hw;
 	}
 	if (toFocus) {
 		if (IsIconic(toFocus)) ShowWindow(toFocus, SW_RESTORE);
+		// SetForegroundWindow from a non-foreground thread is normally ignored.
+		// AttachThreadInput lets us steal focus reliably from the worker thread.
+		DWORD targetTid  = GetWindowThreadProcessId(toFocus, NULL);
+		DWORD currentTid = GetCurrentThreadId();
+		BOOL attached = (targetTid && targetTid != currentTid)
+		    ? AttachThreadInput(currentTid, targetTid, TRUE) : FALSE;
 		SetForegroundWindow(toFocus);
-		SetActiveWindow(toFocus);
-		SetFocus(toFocus);
+		BringWindowToTop(toFocus);
+		if (attached) AttachThreadInput(currentTid, targetTid, FALSE);
 	}
 	gProfiles[profileId].NumHiddenWindows = 0;
 	return windowChanged;
@@ -610,36 +764,35 @@ bool RestoreWindowsForPofile(int profileId) {
 //}
 
 void HandleProfile(int profileId, bool trigger) {
+	int op  = gProfiles[profileId].Operation;
+	u32 pid = gProfiles[profileId].ProcessID;
+
+	if (op == PROF_OP_PAUSE && pid != 0) {
+		// Source of truth: ask the kernel whether the process is suspended.
+		// IsProcessSuspendedSys() uses NtQuerySystemInformation (no per-process
+		// or per-thread handle) so it works even for anti-cheat / elevated
+		// games where OpenThread is blocked.
+		bool wasPaused = IsProcessSuspendedSys(pid);
+		CrashLog("[hotkey] Pause profile %d: wasPaused=%d pid=%u\n", profileId, wasPaused, pid);
+		if (wasPaused) {
+			bool rOk = ResumeProcess(pid);
+			CrashLog("[hotkey] Resume pid=%u ok=%d\n", pid, rOk);
+			Sleep(10);
+			RestoreWindowsForPofile(profileId);
+		} else {
+			gProfiles[profileId].ForegroundWindow = 0;
+			HideWindowsForPofile(profileId);
+			Sleep(10);
+			bool sOk = SuspendProcess(pid);
+			CrashLog("[hotkey] Suspend pid=%u ok=%d\n", pid, sOk);
+		}
+		return;
+	}
 
 	if (trigger) {
-		//order is - hide/minimize/pause here, windows first, processes last
-		bool windowChanged = false;
 		gProfiles[profileId].ForegroundWindow = 0;
-
-		//work with all process windows then
-		windowChanged = HideWindowsForPofile(profileId);
-
-		//now pause stuff if needed
-		if (gProfiles[profileId].PauseEnabled) {
-			if (gProfiles[profileId].ProcessID != 0) {
-				if (windowChanged) {
-					//give it some time to react before pausing
-					Sleep(10);
-					windowChanged = false;
-				}
-
-				SuspendProcess(gProfiles[profileId].ProcessID);
-			}
-		}
-	}
-	else {
-		//order is - unpause / show / restore here, processes first, windows last
-		bool processAwoken = false;
-		if (gProfiles[profileId].PauseEnabled && gProfiles[profileId].ProcessID != 0) {
-			ResumeProcess(gProfiles[profileId].ProcessID);
-			processAwoken = true;
-		}
-		if (processAwoken) Sleep(10);
+		HideWindowsForPofile(profileId);
+	} else {
 		RestoreWindowsForPofile(profileId);
 	}
 }
@@ -754,6 +907,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			}
 			LeaveCriticalSection(&gHotkeyLock);
 
+			// Suppress hotkeys while the hotkey edit box has focus.
+			// gHotkeyEditActive is set/cleared by the subclass WM_SETFOCUS/WM_KILLFOCUS —
+			// no cross-thread calls needed here (LL hooks must not block).
+			if (matchIndex >= 0 && gHotkeyEditActive)
+				matchIndex = -1;
+
 			if (matchIndex >= 0) {
 				if (down && !gHotkeyHeld[matchIndex]) {
 					gHotkeyHeld[matchIndex] = true;
@@ -831,11 +990,48 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 	return(Result);
 }
 
+// ---------------------------------------------------------------------------
+//  Crash logger: catches unhandled exceptions and writes a report to %TEMP%
+// ---------------------------------------------------------------------------
+static FILE* gCrashLog = NULL;
+
+void CrashLog(const char* fmt, ...) {
+    if (!gCrashLog) return;
+    va_list a; va_start(a, fmt); vfprintf(gCrashLog, fmt, a); va_end(a);
+    fflush(gCrashLog);
+}
+
+static LONG WINAPI UnhandledCrash(EXCEPTION_POINTERS* ep) {
+    CrashLog("*** UNHANDLED EXCEPTION ***\n");
+    CrashLog("  Code    : 0x%08X\n", (unsigned)ep->ExceptionRecord->ExceptionCode);
+    CrashLog("  Address : %p\n",              ep->ExceptionRecord->ExceptionAddress);
+    CrashLog("  Flags   : 0x%08X\n", (unsigned)ep->ExceptionRecord->ExceptionFlags);
+    if (ep->ExceptionRecord->NumberParameters > 0)
+        CrashLog("  Info[0] : 0x%p\n", (void*)ep->ExceptionRecord->ExceptionInformation[0]);
+    if (ep->ExceptionRecord->NumberParameters > 1)
+        CrashLog("  Info[1] : 0x%p\n", (void*)ep->ExceptionRecord->ExceptionInformation[1]);
+    if (gCrashLog) { fclose(gCrashLog); gCrashLog = NULL; }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _In_ PWSTR CmdLine, _In_ int CmdShow)
 {
 	for (int ai = 1; ai < __argc; ai++) {
 		if (lstrcmpiW(__wargv[ai], L"--selftest") == 0)
 			return RunSelfTests();
+		if (lstrcmpiW(__wargv[ai], L"--monitor-debug") == 0)
+			return RunMonitorDebug();
+		if (lstrcmpiW(__wargv[ai], L"--vcp-sweep") == 0)
+			return RunVcpSweep();
+	}
+
+	// Install crash logger
+	{
+		char p[MAX_PATH]; GetTempPathA(MAX_PATH, p);
+		strcat_s(p, MAX_PATH, "uac-crash.txt");
+		fopen_s(&gCrashLog, p, "w");
+		SetUnhandledExceptionFilter(UnhandledCrash);
+		CrashLog("=== UAC crash log started ===\n");
 	}
 
 	bool autostart = false;
@@ -860,6 +1056,10 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 
 	InitializeCriticalSection(&gHotkeyLock);
 	WorkerInit();
+	DisplayInit();                    // must be called before worker thread starts
+	LoadMonPresets();                 // restore previously-saved preset names
+	DisplayPopulatePresetsFromCaps(); // add any E2 entries the monitor advertises that aren't in INI yet
+	CrashLog("[main] DisplayInit done\n");
 	workerThread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, NULL);
 	if (workerThread == NULL) {
 		MsgBox(L"Failed to start worker thread!", APPNAME L" Error", MB_OK | MB_ICONERROR);
@@ -967,10 +1167,77 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	{
 		while (PeekMessageW(&WndMsg, NULL, 0, 0, PM_REMOVE)) {
 			if (WndMsg.message == WM_QUIT) { gIsRunning = FALSE; break; }
-			if (gSettingsWnd && IsDialogMessageW(gSettingsWnd, &WndMsg))
+			// Don't pass WM_SYSKEYDOWN through IsDialogMessage — it eats Alt+key combos
+			// preventing Alt+OEM_3 (and similar) from reaching the hotkey edit subclass.
+			if (WndMsg.message != WM_SYSKEYDOWN && gSettingsWnd && IsDialogMessageW(gSettingsWnd, &WndMsg))
 				continue;
 			TranslateMessage(&WndMsg);
 			DispatchMessageW(&WndMsg);
+		}
+
+		// Foreground-app polling for display presets (~400 ms).
+		// Detect which app is in focus, find its profile's DisplayPreset,
+		// and push JOB_APPLY_DISPLAY so the worker updates the monitor.
+		if (gDisplayControlEnabled) {
+			static HWND  sFgLast   = NULL;
+			static DWORD sFgPollMs = 0;
+			DWORD tNow = GetTickCount();
+			if (tNow - sFgPollMs >= 400) {
+				sFgPollMs = tNow;
+				HWND fg = GetForegroundWindow();
+				if (fg != sFgLast) {
+					// Only act when the window is on the PRIMARY monitor.
+					// If it's on a secondary display, leave the last preset active.
+					if (fg) {
+						HMONITOR hfg = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+						MONITORINFO mfi = { sizeof(mfi) };
+						if (hfg && GetMonitorInfo(hfg, &mfi) &&
+						    !(mfi.dwFlags & MONITORINFOF_PRIMARY)) {
+							// Secondary monitor — skip, don't update sFgLast
+							goto fg_poll_done;
+						}
+					}
+					sFgLast = fg;
+					// Find which preset applies: scan profiles by exe name.
+					wchar_t presetName[MAX_NAME] = {0};
+					if (fg) {
+						DWORD pid = 0;
+						GetWindowThreadProcessId(fg, &pid);
+						HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+						if (hp) {
+							wchar_t exePath[MAX_PATH] = {0};
+							DWORD sz = MAX_PATH;
+							if (QueryFullProcessImageNameW(hp, 0, exePath, &sz)) {
+								wchar_t* slash = wcsrchr(exePath, L'\\');
+								wchar_t* exeFile = slash ? slash + 1 : exePath;
+								for (int i = 0; i < gNumProfiles; i++) {
+									if (gProfiles[i].ProgramExeName[0] &&
+									    _wcsicmp(gProfiles[i].ProgramExeName, exeFile) == 0 &&
+									    gProfiles[i].DisplayPreset[0]) {
+										wcscpy_s(presetName, MAX_NAME, gProfiles[i].DisplayPreset);
+										break;
+									}
+								}
+							}
+							CloseHandle(hp);
+						}
+					}
+					// Fall back to default preset when no profile matched
+					if (!presetName[0] && gDefaultPresetName[0])
+						wcscpy_s(presetName, MAX_NAME, gDefaultPresetName);
+
+					if (presetName[0]) {
+						EnterCriticalSection(&gHotkeyLock);
+						gDesiredDisplay.hwnd  = fg ? fg : GetDesktopWindow();
+						gDesiredDisplay.valid = true;
+						wcscpy_s(gDesiredDisplay.presetName, MAX_NAME, presetName);
+						LeaveCriticalSection(&gHotkeyLock);
+						Job jd = { JOB_APPLY_DISPLAY, 0 };
+						JobQueuePush(jd);
+					}
+				}
+			}
+			fg_poll_done:;
 		}
 
 		// MsgWaitForMultipleObjects instead of Sleep(5): the thread wakes immediately
@@ -1002,6 +1269,9 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 		}
 		gProfiles[i].NumHiddenWindows = 0;
 	}
+
+	// Restore all monitors we adjusted to their original values.
+	DisplayRestoreAll();
 
 Exit:
 	// Unhook the hook before exiting

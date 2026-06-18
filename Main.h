@@ -2,7 +2,7 @@
 
 #pragma warning(disable:4820) // padding in structures
 
-#define VERSION L"1.1.0"
+#define VERSION L"1.2.0"
 #define APPNAME L"UniversalAppControl"
 
 // The Lord's data types.
@@ -26,9 +26,43 @@ extern _NtSuspendProcess NtSuspendProcess;
 extern _NtResumeProcess NtResumeProcess;
 extern _HungWindowFromGhostWindow HungWindowFromGhostWindow;
 
+// Query the live suspended-state of a process the same way Task Manager and
+// Resource Monitor do it: NtQuerySystemInformation(SystemProcessInformation)
+// gives kernel-side data with WaitReason==Suspended for frozen threads. No
+// per-process or per-thread handle required, so anti-cheat / protected
+// processes can't block the query.
+// Returns true iff the process exists AND every one of its threads is in the
+// Suspended wait state.
+bool IsProcessSuspendedSys(u32 processId);
+
 #define MAX_PROFILES 20
 #define MAX_PROCESSES_PER_PROFILE 40
 #define MAX_NAME 128
+#define MAX_PRESETS 16
+#define PRESET_UNSET  (-1)   // sentinel: "leave this attribute unchanged"
+// DISPLAY_PRESET.ColorTemp stores:
+//   PRESET_UNSET (-1)  : don't change color temperature
+//   1-255             : VCP 0x14 code sent directly to the monitor
+//                       (e.g. 0x05=6500K, 0x08=9300K, 0x0C=User Warm)
+//   >= 256            : legacy Kelvin — mapped to nearest supported VCP code
+
+// ---------------------------------------------------------------------------
+//  Display preset: a named set of monitor settings applied automatically
+//  when a linked app profile is in the foreground.
+//  Each field is 0-100 percent (brightness/contrast) or a Kelvin value
+//  (colortemp); PRESET_UNSET means "don't touch this attribute".
+// ---------------------------------------------------------------------------
+typedef struct _DISPLAY_PRESET
+{
+	wchar_t Name[MAX_NAME];
+	int Brightness;   // 0-100 percent, or PRESET_UNSET
+	int Contrast;     // 0-100 percent, or PRESET_UNSET
+	int ColorTemp;    // VCP 0x14 code (1-255), legacy Kelvin (>=256), or PRESET_UNSET
+	int ProfileMode;    // VCP value to write, or PRESET_UNSET
+	int ProfileModeVcp; // which VCP register holds it (e.g. 0xE2, 0xDC, 0x14); 0 = not set
+	                  // Selects the monitor's named preset (ComfortView=0x0C, FPS=0x0F...)
+	                  // Applied FIRST so B/C/CT can override the preset defaults.
+} DISPLAY_PRESET;
 
 
 // Configurable registry settings.
@@ -42,6 +76,8 @@ typedef struct _PROFILE_CONFIG
 	u32 HotKey;
 	UINT HotKeyModifiers;
 
+	int  Operation;       // PROF_OP_* — replaces HideEnabled/PauseEnabled/MinimizeEnabled
+	// Legacy fields kept so old config files load correctly; derived into Operation on load.
 	BOOL HideEnabled;
 	BOOL PauseEnabled;
 	BOOL MinimizeEnabled;
@@ -57,22 +93,32 @@ typedef struct _PROFILE_CONFIG
 	int NumHiddenWindows;
 
 	HWND ForegroundWindow;
+	// (legacy IsPaused flag removed — we now query the live suspended state via
+	// IsProcessSuspendedSys() so the OS, not our bookkeeping, is the source of truth.)
+
+	wchar_t DisplayPreset[MAX_NAME]; // name of the DISPLAY_PRESET to apply, or L"" for none
 } PROFILE_CONFIG;
 
 // Function declarations.
 void MsgBox(const wchar_t* Message, const wchar_t* Caption, u32 Flags, ...);
 void DbgPrint(const wchar_t* Message, ...);
+void CrashLog(const char* fmt, ...);   // always-on step log -> %TEMP%\uac-crash.txt
 LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARAM WParam, _In_ LPARAM LParam);
 
 extern CONFIG gConfig;
 extern PROFILE_CONFIG gProfiles[MAX_PROFILES];
 extern int gNumProfiles;
+extern DISPLAY_PRESET gPresets[MAX_PRESETS];
+extern int  gNumPresets;
+extern BOOL gDisplayControlEnabled;   // [general] DisplayControl
+extern wchar_t gDefaultPresetName[MAX_NAME]; // [general] DefaultPreset
 extern BOOL gIsRunning;
 extern HANDLE gMutex;
 extern NOTIFYICONDATA gTrayNotifyIconData;
 bool LoadConfig(void);
 
 extern CRITICAL_SECTION gHotkeyLock;   // guards gHotkeys/gNumHotkeys + Triggered
+extern HWND gScanNotifyHwnd;           // preset editor HWND to notify when scan done
 void DispatchHotkey(int hotkeyIndex);  // worker-side: runs the heavy toggle work
 void RebuildHotkeys(void);             // rebuild gHotkeys from in-memory gProfiles; caller holds gHotkeyLock
 const wchar_t* GetExePath(void);

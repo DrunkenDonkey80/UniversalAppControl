@@ -348,47 +348,140 @@ const wchar_t* GetLastErorText() {
 	return messageBuffer;
 }
 
-bool IsProcessSuspended(DWORD processId) {
-	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-	if (hSnapshot == INVALID_HANDLE_VALUE) {
-		//std::cerr << "Failed to create snapshot." << std::endl;
+// --- Kernel-data based suspend probe -----------------------------------------
+// Task Manager and Resource Monitor read process/thread state via
+// NtQuerySystemInformation(SystemProcessInformation). The kernel populates
+// a per-thread WaitReason; a thread frozen by NtSuspendProcess shows
+// WaitReason == Suspended (5). No OpenProcess / OpenThread needed, which is
+// why this works for anti-cheat / elevated processes that block per-handle
+// access.
+//
+// winternl.h has these structs but with most fields named "Reserved", so we
+// declare local copies under UAC_* names to access NumberOfThreads / Threads
+// / WaitReason cleanly. Layouts match what ntdll has used since XP and what
+// ProcessHacker / SystemInformer document.
+
+typedef struct _UAC_CLIENT_ID {
+	HANDLE UniqueProcess;
+	HANDLE UniqueThread;
+} UAC_CLIENT_ID;
+
+typedef struct _UAC_SYSTEM_THREAD_INFORMATION {
+	LARGE_INTEGER KernelTime;
+	LARGE_INTEGER UserTime;
+	LARGE_INTEGER CreateTime;
+	ULONG WaitTime;
+	PVOID StartAddress;
+	UAC_CLIENT_ID ClientId;
+	LONG Priority;
+	LONG BasePriority;
+	ULONG ContextSwitches;
+	ULONG ThreadState;   // 5 = Waiting
+	ULONG WaitReason;    // 5 = Suspended (when ThreadState==Waiting)
+} UAC_SYSTEM_THREAD_INFORMATION;
+
+typedef struct _UAC_SYSTEM_PROCESS_INFORMATION {
+	ULONG NextEntryOffset;
+	ULONG NumberOfThreads;
+	LARGE_INTEGER WorkingSetPrivateSize;
+	ULONG HardFaultCount;
+	ULONG NumberOfThreadsHighWatermark;
+	ULONGLONG CycleTime;
+	LARGE_INTEGER CreateTime;
+	LARGE_INTEGER UserTime;
+	LARGE_INTEGER KernelTime;
+	UNICODE_STRING ImageName;
+	LONG BasePriority;
+	HANDLE UniqueProcessId;
+	HANDLE InheritedFromUniqueProcessId;
+	ULONG HandleCount;
+	ULONG SessionId;
+	ULONG_PTR UniqueProcessKey;
+	SIZE_T PeakVirtualSize;
+	SIZE_T VirtualSize;
+	ULONG PageFaultCount;
+	SIZE_T PeakWorkingSetSize;
+	SIZE_T WorkingSetSize;
+	SIZE_T QuotaPeakPagedPoolUsage;
+	SIZE_T QuotaPagedPoolUsage;
+	SIZE_T QuotaPeakNonPagedPoolUsage;
+	SIZE_T QuotaNonPagedPoolUsage;
+	SIZE_T PagefileUsage;
+	SIZE_T PeakPagefileUsage;
+	SIZE_T PrivatePageCount;
+	LARGE_INTEGER ReadOperationCount;
+	LARGE_INTEGER WriteOperationCount;
+	LARGE_INTEGER OtherOperationCount;
+	LARGE_INTEGER ReadTransferCount;
+	LARGE_INTEGER WriteTransferCount;
+	LARGE_INTEGER OtherTransferCount;
+	UAC_SYSTEM_THREAD_INFORMATION Threads[1];   // flexible array, count = NumberOfThreads
+} UAC_SYSTEM_PROCESS_INFORMATION;
+
+#define UAC_KWaitReason_Suspended  5
+#define UAC_KThreadState_Waiting   5
+#ifndef STATUS_INFO_LENGTH_MISMATCH
+#define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
+#endif
+
+typedef NTSTATUS(NTAPI* _NtQuerySystemInformation)(
+	ULONG SystemInformationClass, PVOID SystemInformation,
+	ULONG SystemInformationLength, PULONG ReturnLength);
+static _NtQuerySystemInformation pNtQuerySystemInformation = NULL;
+#define UAC_SystemProcessInformation 5
+
+bool IsProcessSuspendedSys(u32 processId) {
+	if (processId == 0) return false;
+	if (!pNtQuerySystemInformation) {
+		HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+		if (!nt) return false;
+		pNtQuerySystemInformation = (_NtQuerySystemInformation)
+			GetProcAddress(nt, "NtQuerySystemInformation");
+		if (!pNtQuerySystemInformation) return false;
+	}
+
+	// Snapshot can grow between sizing call and fetch call, so retry on mismatch.
+	ULONG bufSize = 256 * 1024;
+	PVOID buf = NULL;
+	NTSTATUS st = STATUS_INFO_LENGTH_MISMATCH;
+	for (int tries = 0; tries < 6 && st == STATUS_INFO_LENGTH_MISMATCH; tries++) {
+		if (buf) HeapFree(GetProcessHeap(), 0, buf);
+		buf = HeapAlloc(GetProcessHeap(), 0, bufSize);
+		if (!buf) return false;
+		ULONG retLen = 0;
+		st = pNtQuerySystemInformation(UAC_SystemProcessInformation, buf, bufSize, &retLen);
+		if (st == STATUS_INFO_LENGTH_MISMATCH) bufSize = (retLen ? retLen + 64 * 1024 : bufSize * 2);
+	}
+	if (st != 0 /*STATUS_SUCCESS*/) {
+		if (buf) HeapFree(GetProcessHeap(), 0, buf);
+		CrashLog("[suspended?] NtQSI failed st=0x%08lX pid=%u\n", (unsigned long)st, processId);
 		return false;
 	}
 
-	THREADENTRY32 threadEntry;
-	threadEntry.dwSize = sizeof(THREADENTRY32);
-	bool isSuspended = true;  // Assume process is suspended unless proven otherwise
-
-	if (Thread32First(hSnapshot, &threadEntry)) {
-		do {
-			if (threadEntry.th32OwnerProcessID == processId) {
-				// Open the thread
-				HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION| THREAD_SUSPEND_RESUME, FALSE, threadEntry.th32ThreadID);
-				if (hThread) {
-					// Get the thread's suspend count
-					DWORD suspendCount = SuspendThread(hThread);
-					ResumeThread(hThread); // Undo the suspend caused by SuspendThread
-
-					if (suspendCount == 0) {
-						isSuspended = false; // At least one thread is not suspended
+	bool suspended = false;
+	UAC_SYSTEM_PROCESS_INFORMATION* p = (UAC_SYSTEM_PROCESS_INFORMATION*)buf;
+	for (;;) {
+		if ((u32)(uintptr_t)p->UniqueProcessId == processId) {
+			if (p->NumberOfThreads > 0) {
+				suspended = true;
+				for (ULONG i = 0; i < p->NumberOfThreads; i++) {
+					if (p->Threads[i].WaitReason != UAC_KWaitReason_Suspended) {
+						suspended = false;
+						break;
 					}
-					CloseHandle(hThread);
 				}
 			}
-		} while (Thread32Next(hSnapshot, &threadEntry) && isSuspended);
-	}
-	else {
-		//std::cerr << "Failed to retrieve thread information." << std::endl;
+			break;
+		}
+		if (p->NextEntryOffset == 0) break;
+		p = (UAC_SYSTEM_PROCESS_INFORMATION*)((u8*)p + p->NextEntryOffset);
 	}
 
-	CloseHandle(hSnapshot);
-	return isSuspended;
+	HeapFree(GetProcessHeap(), 0, buf);
+	return suspended;
 }
 
 bool SuspendProcess(u32 id) {
-	// NOTE: do NOT call IsProcessSuspended() here — it uses OpenThread which is
-	// blocked by anti-cheat/elevated games and returns wrong results (always "suspended").
-	// The caller (HandleProfile) tracks state via IsPaused flag instead.
 	HANDLE ProcessHandle = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, id);
 	if (ProcessHandle == NULL) {
 		// Silent failure — NO MsgBox (would appear behind fullscreen game and freeze UAC)
@@ -474,15 +567,7 @@ void UpdateProcessIDs() {
 	HANDLE ProcessSnapshot = NULL;
 	PROCESSENTRY32W ProcessEntry = { sizeof(PROCESSENTRY32W) };
 
-	// Remember previous PIDs so we can detect *actual* changes.
-	// Bug fix: previously we cleared ProcessID to 0 here and then compared
-	// gProfiles[i].ProcessID != th32ProcessID, which was ALWAYS true (0 vs new pid),
-	// so IsPaused got reset on every refresh. Result: a paused-and-hidden notepad
-	// would be marked unpaused, the next hotkey press would re-suspend (bumping the
-	// suspend-count) instead of resuming, and the user saw nothing happen.
-	u32 oldPids[MAX_PROFILES];
 	for (int i = 0; i < gNumProfiles; i++) {
-		oldPids[i] = gProfiles[i].ProcessID;
 		gProfiles[i].ProcessID = 0;
 	}
 
@@ -509,23 +594,10 @@ void UpdateProcessIDs() {
 			//DbgPrint(L"Found process %s, comparing to %s: %d", ProcessEntry.szExeFile, gProfiles[i].ProgramExeName, found);
 			if (found) {
 				DbgPrint(L"Found process %s, comparing to %s: %d", ProcessEntry.szExeFile, gProfiles[i].ProgramExeName, found);
-				// Reset pause state only when the process actually restarted:
-				// the previous PID was non-zero AND differs from the new one.
-				if (oldPids[i] != 0 && oldPids[i] != ProcessEntry.th32ProcessID) {
-					gProfiles[i].IsPaused = FALSE;
-				}
 				gProfiles[i].ProcessID = ProcessEntry.th32ProcessID;
 			}
 		}
 	} while (Process32NextW(ProcessSnapshot, &ProcessEntry));
-
-	// Process disappeared entirely (e.g. the user closed it while paused):
-	// clear stale IsPaused so we don't try to resume a non-existent PID later.
-	for (int i = 0; i < gNumProfiles; i++) {
-		if (gProfiles[i].ProcessID == 0 && oldPids[i] != 0) {
-			gProfiles[i].IsPaused = FALSE;
-		}
-	}
 
 	CloseHandle(ProcessSnapshot);
 }
@@ -696,25 +768,23 @@ void HandleProfile(int profileId, bool trigger) {
 	u32 pid = gProfiles[profileId].ProcessID;
 
 	if (op == PROF_OP_PAUSE && pid != 0) {
-		// Use a per-profile flag — do NOT probe with IsProcessSuspended():
-		// anti-cheat / elevated games block OpenThread, so the probe always
-		// returns "suspended" even when the game is running, which causes the
-		// code to take the resume path on every press.
-		BOOL wasPaused = gProfiles[profileId].IsPaused;
+		// Source of truth: ask the kernel whether the process is suspended.
+		// IsProcessSuspendedSys() uses NtQuerySystemInformation (no per-process
+		// or per-thread handle) so it works even for anti-cheat / elevated
+		// games where OpenThread is blocked.
+		bool wasPaused = IsProcessSuspendedSys(pid);
 		CrashLog("[hotkey] Pause profile %d: wasPaused=%d pid=%u\n", profileId, wasPaused, pid);
 		if (wasPaused) {
 			bool rOk = ResumeProcess(pid);
 			CrashLog("[hotkey] Resume pid=%u ok=%d\n", pid, rOk);
 			Sleep(10);
 			RestoreWindowsForPofile(profileId);
-			gProfiles[profileId].IsPaused = FALSE; // clear regardless so next press tries again
 		} else {
 			gProfiles[profileId].ForegroundWindow = 0;
 			HideWindowsForPofile(profileId);
 			Sleep(10);
 			bool sOk = SuspendProcess(pid);
 			CrashLog("[hotkey] Suspend pid=%u ok=%d\n", pid, sOk);
-			gProfiles[profileId].IsPaused = sOk; // only mark paused if suspend actually worked
 		}
 		return;
 	}

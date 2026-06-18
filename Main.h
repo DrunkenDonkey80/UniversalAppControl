@@ -26,6 +26,15 @@ extern _NtSuspendProcess NtSuspendProcess;
 extern _NtResumeProcess NtResumeProcess;
 extern _HungWindowFromGhostWindow HungWindowFromGhostWindow;
 
+// Query the live suspended-state of a process the same way Task Manager and
+// Resource Monitor do it: NtQuerySystemInformation(SystemProcessInformation)
+// gives kernel-side data with WaitReason==Suspended for frozen threads. No
+// per-process or per-thread handle required, so anti-cheat / protected
+// processes can't block the query.
+// Returns true iff the process exists AND every one of its threads is in the
+// Suspended wait state.
+bool IsProcessSuspendedSys(u32 processId);
+
 #define MAX_PROFILES 20
 #define MAX_PROCESSES_PER_PROFILE 40
 #define MAX_NAME 128
@@ -84,7 +93,8 @@ typedef struct _PROFILE_CONFIG
 	int NumHiddenWindows;
 
 	HWND ForegroundWindow;
-	BOOL IsPaused;     // TRUE after we successfully suspended the process; reset when PID changes
+	// (legacy IsPaused flag removed — we now query the live suspended state via
+	// IsProcessSuspendedSys() so the OS, not our bookkeeping, is the source of truth.)
 
 	wchar_t DisplayPreset[MAX_NAME]; // name of the DISPLAY_PRESET to apply, or L"" for none
 } PROFILE_CONFIG;

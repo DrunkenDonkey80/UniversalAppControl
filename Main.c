@@ -474,8 +474,15 @@ void UpdateProcessIDs() {
 	HANDLE ProcessSnapshot = NULL;
 	PROCESSENTRY32W ProcessEntry = { sizeof(PROCESSENTRY32W) };
 
-	//walk over processes from config to get their names
+	// Remember previous PIDs so we can detect *actual* changes.
+	// Bug fix: previously we cleared ProcessID to 0 here and then compared
+	// gProfiles[i].ProcessID != th32ProcessID, which was ALWAYS true (0 vs new pid),
+	// so IsPaused got reset on every refresh. Result: a paused-and-hidden notepad
+	// would be marked unpaused, the next hotkey press would re-suspend (bumping the
+	// suspend-count) instead of resuming, and the user saw nothing happen.
+	u32 oldPids[MAX_PROFILES];
 	for (int i = 0; i < gNumProfiles; i++) {
+		oldPids[i] = gProfiles[i].ProcessID;
 		gProfiles[i].ProcessID = 0;
 	}
 
@@ -502,14 +509,23 @@ void UpdateProcessIDs() {
 			//DbgPrint(L"Found process %s, comparing to %s: %d", ProcessEntry.szExeFile, gProfiles[i].ProgramExeName, found);
 			if (found) {
 				DbgPrint(L"Found process %s, comparing to %s: %d", ProcessEntry.szExeFile, gProfiles[i].ProgramExeName, found);
-				if (gProfiles[i].ProcessID != ProcessEntry.th32ProcessID) {
-					// PID changed = process restarted; reset pause state
+				// Reset pause state only when the process actually restarted:
+				// the previous PID was non-zero AND differs from the new one.
+				if (oldPids[i] != 0 && oldPids[i] != ProcessEntry.th32ProcessID) {
 					gProfiles[i].IsPaused = FALSE;
 				}
 				gProfiles[i].ProcessID = ProcessEntry.th32ProcessID;
 			}
 		}
 	} while (Process32NextW(ProcessSnapshot, &ProcessEntry));
+
+	// Process disappeared entirely (e.g. the user closed it while paused):
+	// clear stale IsPaused so we don't try to resume a non-existent PID later.
+	for (int i = 0; i < gNumProfiles; i++) {
+		if (gProfiles[i].ProcessID == 0 && oldPids[i] != 0) {
+			gProfiles[i].IsPaused = FALSE;
+		}
+	}
 
 	CloseHandle(ProcessSnapshot);
 }

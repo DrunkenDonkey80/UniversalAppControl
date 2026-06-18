@@ -782,7 +782,26 @@ void HandleProfile(int profileId, bool trigger) {
 		} else {
 			gProfiles[profileId].ForegroundWindow = 0;
 			HideWindowsForPofile(profileId);
-			Sleep(10);
+
+			// Give the desktop compositor (DWM) time to actually evict the
+			// just-hidden window from the screen before we freeze the process.
+			// ShowWindow(SW_HIDE) returns as soon as the game's wndproc has
+			// processed it, but for fullscreen / borderless DirectX titles
+			// (ELEX, most modern games) DWM still needs several refresh frames
+			// to swap the game's swap-chain out and recompose the desktop.
+			// If we suspend before that finishes, the game can no longer drive
+			// the mode-switch and its last frame stays painted on screen.
+			//
+			// Two-step nudge:
+			//   1. Hand foreground to the shell / desktop so DWM has a clear
+			//      reason to recompose without the game's surface on top.
+			//   2. Sleep long enough for at least a few frames at 60Hz
+			//      (16.7 ms each).  300 ms is imperceptible to the user but
+			//      comfortably covers the worst-case FSE mode-switch.
+			HWND shell = GetShellWindow();
+			if (shell) SetForegroundWindow(shell);
+			Sleep(300);
+
 			bool sOk = SuspendProcess(pid);
 			CrashLog("[hotkey] Suspend pid=%u ok=%d\n", pid, sOk);
 		}

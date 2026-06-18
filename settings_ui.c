@@ -1094,10 +1094,14 @@ void ShowSettingsWindow(HINSTANCE inst, HWND owner) {
     }
 
     {
-        DWORD winStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        DWORD winStyle   = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        // WS_EX_APPWINDOW forces a taskbar entry even though our owner (the
+        // hidden tray-message window) has WS_EX_TOOLWINDOW, which would
+        // otherwise propagate 'no taskbar' to this child.
+        DWORD winStyleEx = WS_EX_APPWINDOW;
         RECT wrc = { 0, 0, FX + FW + M, M + LH + 8 + 28 + M + 60 };  // +60 for display rows
-        AdjustWindowRectEx(&wrc, winStyle, FALSE, 0);
-        gSettingsWnd = CreateWindowExW(0, L"UAC_SettingsWnd", APPNAME L" v" VERSION L" - Settings",
+        AdjustWindowRectEx(&wrc, winStyle, FALSE, winStyleEx);
+        gSettingsWnd = CreateWindowExW(winStyleEx, L"UAC_SettingsWnd", APPNAME L" v" VERSION L" - Settings",
             winStyle, CW_USEDEFAULT, CW_USEDEFAULT,
             wrc.right - wrc.left, wrc.bottom - wrc.top,
             owner, NULL, inst, NULL);

@@ -757,22 +757,26 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                         // Update slider labels (Brightness: XX / Contrast: XX%)
                         PeUpdateLabels(wnd);
 
-                        // --- Monitor preset via F0 ---
-                        // F0 is a WRITE-TRIGGER register on Dell: writes change the
-                        // visible mode but reads return 0x00 unless the last change
-                        // came through F0 itself (OSD changes don't update F0).
-                        // So Capture only fills F0 when there's actually something to
-                        // read — otherwise B/C are captured but the F0 selection is
-                        // left alone for the user to pick from the pre-populated combo.
-                        if (captured.ProfileModeVcp == 0xF0 && captured.ProfileMode != 0) {
+                        // --- Monitor preset ---
+                        // Capture reads the current picture-mode register (F0).
+                        // If the read succeeded and returned a non-zero value, add
+                        // it as the preset's monitor mode and select it in the combo.
+                        // If the read failed or returned 0x00, the current visible
+                        // mode isn't accessible via DDC/CI (e.g. set via OSD to Warm /
+                        // Cool / Custom Color which Dell exposes only through the
+                        // OSD).  In that case we uncheck the "set monitor mode"
+                        // checkbox and tell the user to try a different mode.
+                        if (captured.ProfileModeVcp != 0 && captured.ProfileMode != 0 &&
+                            captured.ProfileMode != PRESET_UNSET) {
                             int capturedCode = captured.ProfileMode;
-                            DisplayRecordProfile(0xF0, capturedCode);
+                            BYTE  capturedReg = (BYTE)captured.ProfileModeVcp;
+                            DisplayRecordProfile(capturedReg, capturedCode);
                             SaveMonPresets();
                             p->ProfileMode    = capturedCode;
-                            p->ProfileModeVcp = 0xF0;
+                            p->ProfileModeVcp = capturedReg;
                             HWND prCb = GetDlgItem(wnd, IDC_PE_PROFILE);
                             BuildProfileCombo(prCb);
-                            LRESULT wantKey = (LRESULT)((0xF0 << 8) | (capturedCode & 0xFF));
+                            LRESULT wantKey = (LRESULT)((capturedReg << 8) | (capturedCode & 0xFF));
                             int cnt2 = ComboBox_GetCount(prCb);
                             for (int _ci = 0; _ci < cnt2; _ci++) {
                                 if (SendMessage(prCb, CB_GETITEMDATA, _ci, 0) == wantKey) {
@@ -781,6 +785,22 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                                 }
                             }
                             CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_CHECKED);
+                        } else {
+                            // Read failed or returned 0 — mode not capturable via DDC/CI
+                            CheckDlgButton(wnd, IDC_PE_PROF_CHK, BST_UNCHECKED);
+                            p->ProfileMode    = PRESET_UNSET;
+                            p->ProfileModeVcp = 0;
+                            ComboBox_SetCurSel(GetDlgItem(wnd, IDC_PE_PROFILE), 0); // "(none)"
+                            MessageBoxW(wnd,
+                                L"The currently selected monitor mode cannot be "
+                                L"read or used via DDC/CI.\n\n"
+                                L"This usually happens for modes set via the monitor's "
+                                L"on-screen menu (e.g. Warm, Cool, Custom Color).\n\n"
+                                L"Try selecting a different mode in the monitor menu "
+                                L"and capturing again. Brightness and contrast were "
+                                L"still captured.",
+                                APPNAME L" - Monitor mode not capturable",
+                                MB_OK | MB_ICONINFORMATION);
                         }
 
                         SaveConfig();

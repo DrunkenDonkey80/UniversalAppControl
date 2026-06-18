@@ -44,9 +44,10 @@ static bool              gMonInited  = false;
 //  Win32 GetVCPFeatureAndVCPFeatureReply / SetVCPFeature do NOT enforce
 //  these gaps themselves — we have to do it.
 
-#define DDC_INTER_OP_MS  45  // min gap before any read/write
-#define DDC_POST_WRITE_MS 80 // additional gap after a write
-#define DDC_RETRIES       3  // ddccontrol retries reads 3x
+#define DDC_INTER_OP_MS    45    // min gap before any read/write
+#define DDC_POST_WRITE_MS  80    // additional gap after a write
+#define DDC_PRESET_WRITE_MS 2000 // F0/picture-mode needs this per ddccontrol-db DEL41DA.xml delay="2000"
+#define DDC_RETRIES        3     // ddccontrol retries reads 3x
 
 static ULONGLONG gLastDdcOpTick = 0;
 
@@ -79,7 +80,31 @@ static BOOL DdcciGetFeature(HANDLE h, BYTE vcp, DWORD* pType, DWORD* pCur, DWORD
     return FALSE;
 }
 
-// Write + 80 ms post-delay + SAVE + verification.
+// Dell S-series / gaming-monitor F0 picture-mode codes.
+// From ddccontrol-db's DEL41DA.xml (same caps-string family as S3422DWG):
+//   <control id="preset_profile" address="0xf0" refresh="all" delay="2000">
+//
+// CRITICAL: writing F0=0x00 CRASHES the monitor (per DEL41DA comment).
+// Modes labeled 0x00 in the DB (Standard, Game1, Warm, Cool, Custom Color)
+// have NO F0 code at all — they can only be selected via the OSD.
+static const struct { BYTE code; const wchar_t* name; } kDellF0Modes[] = {
+    { 0x0C, L"ComfortView"  },
+    { 0x0D, L"Game 2"       },
+    { 0x0E, L"Game 3"       },
+    { 0x0F, L"FPS"          },
+    { 0x10, L"RTS / MOBA"   },
+    { 0x11, L"RPG"          },
+    { 0x13, L"Sports"       },
+};
+static const int kDellF0ModeCount = (int)(sizeof(kDellF0Modes)/sizeof(kDellF0Modes[0]));
+
+static const wchar_t* DellF0Name(BYTE code) {
+    for (int i = 0; i < kDellF0ModeCount; i++)
+        if (kDellF0Modes[i].code == code) return kDellF0Modes[i].name;
+    return NULL;
+}
+
+// Write + verification.  F0 gets 2000 ms settle time per ddccontrol-db.
 //
 //  Per docs/DDCCONTROL_ANALYSIS.md §10: VCP registers come in three types —
 //  value (stateful), command (write-only trigger), list (stateful enum).  Dell's
@@ -91,12 +116,22 @@ static BOOL DdcciGetFeature(HANDLE h, BYTE vcp, DWORD* pType, DWORD* pCur, DWORD
 //  For value/list registers (brightness 0x10, contrast 0x12, color preset 0x14):
 //  read the same register back; matching value means write was accepted.
 static BOOL DdcciSetFeatureVerified(HANDLE h, BYTE vcp, DWORD want) {
+    // Safety: writing F0=0x00 crashes Dell gaming monitors (ddccontrol-db DEL41DA.xml)
+    if (vcp == 0xF0 && want == 0) {
+        CrashLog("[ddc] BLOCKED: F0=0x00 would crash monitor; skipping\n");
+        return FALSE;
+    }
+
     DdcciWaitInterOp();
     BOOL setOk = FALSE;
     __try { setOk = SetVCPFeature(h, vcp, want); }
     __except(EXCEPTION_EXECUTE_HANDLER) { setOk = FALSE; }
     DdcciStampOp();
-    Sleep(DDC_POST_WRITE_MS);
+
+    // Picture-mode (F0) needs 2000 ms settle per ddccontrol-db; others 80 ms
+    DWORD postDelay = (vcp == 0xF0) ? DDC_PRESET_WRITE_MS : DDC_POST_WRITE_MS;
+    Sleep(postDelay);
+
     if (!setOk) {
         CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX SetVCPFeature FAILED\n", vcp, want);
         return FALSE;
@@ -561,29 +596,19 @@ static const BYTE kF0Defaults[] = {
 static const int kF0DefaultCount = (int)(sizeof(kF0Defaults) / sizeof(kF0Defaults[0]));
 
 void DisplayPopulatePresetsFromCaps(void) {
-    // Strip stale E2 entries from INI (E2 writes silently ignored — useless).
-    int kept = 0;
-    for (int i = 0; i < gMonPresetCount; i++) {
-        if (gMonPresets[i].vcpReg != 0xE2)
-            gMonPresets[kept++] = gMonPresets[i];
-    }
-    gMonPresetCount = kept;
-
-    // F0 is a command register: writes change the visible mode but reads are
-    // unreliable.  Capabilities advertise a subset of valid F0 codes but Dell
-    // monitors are known to accept (and react to) codes outside that subset.
-    // Strategy: populate the FULL 0x00..0xFF range as F0 commands so the user
-    // can experiment.  Each entry's effect is logged via the E2 readback in
-    // DdcciSetFeatureVerified, so the crash log doubles as a discovery record.
+    // No auto-population. The monitor preset combo is built strictly from the
+    // user's Capture results. We tried auto-populating from caps F0(...)/E2(...)
+    // and from hardcoded Dell F0 tables; both produced unreliable results because
+    // the F0->E2 mapping is monitor-firmware-specific and many advertised F0 codes
+    // either crash the monitor (F0=0x00 on Dell gaming) or no-op.
     //
-    // Entries already in gMonPresets (loaded from INI — e.g. user-renamed ones)
-    // are kept as-is; DisplayRecordProfile no-ops on duplicates.
-    for (int v = 0x00; v <= 0xFF; v++) {
-        DisplayRecordProfile(0xF0, v);
+    // Wipe any old entries left over from previous experiments so the user gets
+    // a clean slate on this build.
+    if (gMonPresetCount > 0) {
+        CrashLog("[display] Populate: clearing %d stale entries\n", gMonPresetCount);
+        gMonPresetCount = 0;
+        SaveMonPresets();
     }
-    CrashLog("[display] Populate: F0 full 0x00..0xFF range -> %d total entries\n",
-             gMonPresetCount);
-    SaveMonPresets();
 }
 
 void DisplayRefresh(void) {

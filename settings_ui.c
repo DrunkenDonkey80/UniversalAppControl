@@ -1001,7 +1001,7 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                     if (code == EN_KILLFOCUS) ApplyFieldsToSelection(wnd);
                     break;
                 case IDC_OPERATION:
-                    if (code == BN_CLICKED) ApplyFieldsToSelection(wnd);
+                    if (code == CBN_SELCHANGE) ApplyFieldsToSelection(wnd);
                     break;
                 case IDC_REMOVE:
                     if (gSelected >= 0 && gSelected < gNumProfiles) {

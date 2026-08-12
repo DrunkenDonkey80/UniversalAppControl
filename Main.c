@@ -5,7 +5,9 @@
 #define _UNICODE
 #endif
 
-#define WM_TRAYICON (WM_USER + 1)
+#define WM_TRAYICON        (WM_USER + 1)
+#define WM_RESTORE_WINDOW  (WM_APP + 1)
+#define WM_ACTIVATE_WINDOW (WM_APP + 2)
 
 #include <Windows.h>
 #include <stdio.h>
@@ -728,22 +730,16 @@ bool RestoreWindowsForPofile(int profileId) {
 		HWND hw = gProfiles[profileId].HiddenWindows[i];
 		if (!IsWindow(hw)) continue;
 		int op_ = gProfiles[profileId].Operation;
-	if (RestoreWindow(hw, op_ == PROF_OP_HIDE || op_ == PROF_OP_PAUSE, op_ == PROF_OP_MINIMIZE))
+		if (op_ != PROF_OP_NONE &&
+		    PostMessageW(gTrayNotifyIconData.hWnd, WM_RESTORE_WINDOW, (WPARAM)hw, (LPARAM)op_))
 			windowChanged = true;
 		if (toFocus == NULL) toFocus = hw;
 		if (hw == gProfiles[profileId].ForegroundWindow) toFocus = hw;
 	}
 	if (toFocus) {
-		if (IsIconic(toFocus)) ShowWindow(toFocus, SW_RESTORE);
-		// SetForegroundWindow from a non-foreground thread is normally ignored.
-		// AttachThreadInput lets us steal focus reliably from the worker thread.
-		DWORD targetTid  = GetWindowThreadProcessId(toFocus, NULL);
-		DWORD currentTid = GetCurrentThreadId();
-		BOOL attached = (targetTid && targetTid != currentTid)
-		    ? AttachThreadInput(currentTid, targetTid, TRUE) : FALSE;
-		SetForegroundWindow(toFocus);
-		BringWindowToTop(toFocus);
-		if (attached) AttachThreadInput(currentTid, targetTid, FALSE);
+		// Keep window enumeration off the hook thread, then return restoration
+		// and activation to the main thread that received the keyboard input.
+		PostMessageW(gTrayNotifyIconData.hWnd, WM_ACTIVATE_WINDOW, (WPARAM)toFocus, 0);
 	}
 	gProfiles[profileId].NumHiddenWindows = 0;
 	return windowChanged;
@@ -964,6 +960,27 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 
 	switch (Message)
 	{
+		case WM_RESTORE_WINDOW:
+		{
+			HWND target = (HWND)WParam;
+			int op = (int)LParam;
+			if (IsWindow(target))
+				RestoreWindow(target, op == PROF_OP_HIDE || op == PROF_OP_PAUSE,
+				              op == PROF_OP_MINIMIZE);
+			break;
+		}
+		case WM_ACTIVATE_WINDOW:
+		{
+			HWND target = (HWND)WParam;
+			if (IsWindow(target)) {
+				if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
+				BOOL activated = SetForegroundWindow(target);
+				BringWindowToTop(target);
+				CrashLog("[focus] target=%p activated=%d foreground=%p\n",
+				         (void*)target, activated, (void*)GetForegroundWindow());
+			}
+			break;
+		}
 		case WM_TRAYICON:
 		{
 			if (LParam == WM_LBUTTONUP || LParam == WM_LBUTTONDBLCLK) {

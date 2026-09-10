@@ -6,6 +6,7 @@
 #define IDM_INSTALL    2003
 #define IDM_OPENINI    2004
 #define IDM_QUIT       2005
+#define IDM_UNHIDE     2006
 
 // Settings window controls
 #define IDC_LIST       3001

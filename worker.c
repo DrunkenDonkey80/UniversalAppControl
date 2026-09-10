@@ -23,7 +23,11 @@ void WorkerInit(void) {
 bool JobQueuePush(Job job) {
     EnterCriticalSection(&gQueueLock);
     int next = (gTail + 1) % JOB_QUEUE_CAP;
-    if (next == gHead) { LeaveCriticalSection(&gQueueLock); return false; }
+    if (next == gHead) {
+        LeaveCriticalSection(&gQueueLock);
+        CrashLog("[worker] queue full; dropped job type=%d\n", job.type);
+        return false;
+    }
     gQueue[gTail] = job;
     gTail = next;
     LeaveCriticalSection(&gQueueLock);
@@ -53,7 +57,9 @@ DWORD WINAPI WorkerThreadProc(LPVOID param) {
     Job job;
     while (JobQueuePop(&job)) {
         switch (job.type) {
-            case JOB_TOGGLE_HOTKEY:  DispatchHotkey(job.hotkeyIndex); break;
+            case JOB_TOGGLE_HOTKEY:
+                DispatchHotkey(job.hotkeyIndex, job.hotkeyGeneration);
+                break;
             case JOB_RELOAD_CONFIG: {
                 EnterCriticalSection(&gHotkeyLock);
                 LoadConfig();

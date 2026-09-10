@@ -12,6 +12,7 @@
 #include <Windows.h>
 #include <stdio.h>
 #include <TlHelp32.h>
+#include <tchar.h>
 #include <winternl.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -49,6 +50,7 @@ typedef struct _HotkeyInfo
 	UINT Modifiers;
 
 	bool Triggered;
+	bool Registered;
 	int ProfileIDs[MAX_PROFILES];
 	int NumProfileIDs;
 } HotkeyInfo;
@@ -62,6 +64,7 @@ u32 gPausedProcesses[MAX_PROFILES * MAX_PROCESSES_PER_PROFILE];
 int gNumPausedProcesses=0;
 
 CRITICAL_SECTION gHotkeyLock;
+volatile LONG gHotkeyGeneration = 0;
 UINT gTaskbarCreatedMsg = 0;
 
 typedef struct _WindowInfo
@@ -160,13 +163,10 @@ static void RegisterConfigHotkey(const wchar_t* section, const wchar_t* variable
 			gHotkeys[gNumHotkeys].HotKey = hotKey;
 			gHotkeys[gNumHotkeys].Modifiers = modifiers;
 			gHotkeys[gNumHotkeys].Triggered = false;
+			gHotkeys[gNumHotkeys].Registered = false;
 			gHotkeys[gNumHotkeys].NumProfileIDs = 0;
 			gHotkeys[gNumHotkeys].ProfileIDs[gHotkeys[gNumHotkeys].NumProfileIDs++] = profileID;
 
-			//if (RegisterHotKey(NULL, gNumHotkeys, MOD_NOREPEAT | modifiers, hotKey) == 0)
-			//{
-			//	MsgBox(L"Failed to register hotkey! Error 0x%08lx", APPNAME L" Error", MB_OK | MB_ICONERROR, GetLastError());
-			//}
 			gNumHotkeys++;
 		}
 	}
@@ -174,11 +174,26 @@ static void RegisterConfigHotkey(const wchar_t* section, const wchar_t* variable
 
 
 void UnregisterHotkeys() {
-	for (int i = 0; i < gNumHotkeys; i++)
-		UnregisterHotKey(NULL, i);
+	InterlockedIncrement(&gHotkeyGeneration); // invalidate queued LL-hook fallback jobs
+	for (int i = 0; i < gNumHotkeys; i++) {
+		if (gHotkeys[i].Registered)
+			UnregisterHotKey(gTrayNotifyIconData.hWnd, i);
+	}
 
 	gNumHotkeys = 0;
 	memset(gHotkeyHeld, 0, sizeof(gHotkeyHeld));
+}
+
+static void RegisterSystemHotkeys(void) {
+	HWND receiver = gTrayNotifyIconData.hWnd;
+	if (!receiver) return;
+	for (int i = 0; i < gNumHotkeys; i++) {
+		gHotkeys[i].Registered = RegisterHotKey(receiver, i,
+			MOD_NOREPEAT | gHotkeys[i].Modifiers, gHotkeys[i].HotKey) != FALSE;
+		CrashLog("[hotkey] RegisterHotKey id=%d key=0x%02X mods=0x%X ok=%d err=%lu\n",
+			i, gHotkeys[i].HotKey, gHotkeys[i].Modifiers,
+			gHotkeys[i].Registered, gHotkeys[i].Registered ? 0 : GetLastError());
+	}
 }
 
 void RebuildHotkeys(void) {
@@ -198,11 +213,13 @@ void RebuildHotkeys(void) {
 			gHotkeys[gNumHotkeys].HotKey       = p->HotKey;
 			gHotkeys[gNumHotkeys].Modifiers     = p->HotKeyModifiers;
 			gHotkeys[gNumHotkeys].Triggered     = false;
+			gHotkeys[gNumHotkeys].Registered    = false;
 			gHotkeys[gNumHotkeys].NumProfileIDs = 1;
 			gHotkeys[gNumHotkeys].ProfileIDs[0] = i;
 			gNumHotkeys++;
 		}
 	}
+	RegisterSystemHotkeys();
 }
 
 void EnableDebugConsole() {
@@ -312,7 +329,7 @@ static bool ReadConfig() {
 
 			ReadConfigString(sectionName, L"ProgramExeName", gProfiles[gNumProfiles].ProgramExeName);
 			ReadConfigString(sectionName, L"ProgramPath", gProfiles[gNumProfiles].ProgramPath);
-			ReadConfigList(sectionName, L"WindowNames", '|', &gProfiles[gNumProfiles].WindowNames, &gProfiles[gNumProfiles].NumWindows);
+			ReadConfigList(sectionName, L"WindowNames", '|', gProfiles[gNumProfiles].WindowNames, &gProfiles[gNumProfiles].NumWindows);
 			ReadConfigString(sectionName, L"DisplayPreset", gProfiles[gNumProfiles].DisplayPreset);
 
 			gNumProfiles++;
@@ -341,10 +358,10 @@ const wchar_t* GetLastErorText() {
 		//Ask Win32 to give us the string version of that message ID.
 		//The parameters we pass in, tell Win32 to create the buffer that holds the message for us (because we don't yet know how long the message string will be).
 		size_t size = FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-			NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), &messageBuffer, sizeof(messageBuffer) / sizeof(wchar_t), NULL);
+			NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), messageBuffer, _countof(messageBuffer), NULL);
 
 		//concat the error code
-		swprintf(&messageBuffer[size], sizeof(messageBuffer) /sizeof(wchar_t), L"Code: 0x%08lx", errorMessageID);
+		swprintf_s(&messageBuffer[size], _countof(messageBuffer) - size, L"Code: 0x%08lx", errorMessageID);
 	}
 
 	return messageBuffer;
@@ -660,8 +677,8 @@ bool HideWindowForProfile(HWND hWnd, int profileId, HWND activeWindow) {
 			windowChanged = true;
 		}
 		else if (op == PROF_OP_MINIMIZE && IsWindowVisible(hWnd) && !IsIconic(hWnd)) {
-			ShowWindow(hWnd, SW_MINIMIZE);
-			windowChanged = true;
+			// Match the title-bar button so apps preserve their maximized restore state.
+			windowChanged = PostMessageW(hWnd, WM_SYSCOMMAND, SC_MINIMIZE, 0) != FALSE;
 		}
 
 		if (windowChanged && gProfiles[profileId].NumHiddenWindows < MAX_PROCESSES_PER_PROFILE) {
@@ -697,13 +714,13 @@ bool HideWindowsForPofile(int profileId) {
 
 bool RestoreWindow(HWND hWnd, bool hide, bool minimise) {
 	bool windowChanged = false;
+	// Never wait for a paused or hung application's window procedure on the tray thread.
 	if (hide) {
-		ShowWindow(hWnd, SW_SHOW);
+		ShowWindowAsync(hWnd, SW_SHOW);
 		windowChanged = true;
 	}
-	else if (minimise) {
-		ShowWindow(hWnd, SW_RESTORE);
-		windowChanged = true;
+	else if (minimise && IsIconic(hWnd)) {
+		windowChanged = PostMessageW(hWnd, WM_SYSCOMMAND, SC_RESTORE, 0) != FALSE;
 	}
 
 	return windowChanged;
@@ -726,20 +743,30 @@ bool RestoreWindowsForPofile(int profileId) {
 	}
 
 	HWND toFocus = NULL;
+	DWORD trayThread = GetWindowThreadProcessId(gTrayNotifyIconData.hWnd, NULL);
+	bool onTrayThread = trayThread != 0 && trayThread == GetCurrentThreadId();
 	for (int i = 0; i < gProfiles[profileId].NumHiddenWindows; i++) {
 		HWND hw = gProfiles[profileId].HiddenWindows[i];
 		if (!IsWindow(hw)) continue;
 		int op_ = gProfiles[profileId].Operation;
-		if (op_ != PROF_OP_NONE &&
-		    PostMessageW(gTrayNotifyIconData.hWnd, WM_RESTORE_WINDOW, (WPARAM)hw, (LPARAM)op_))
-			windowChanged = true;
+		if (op_ != PROF_OP_NONE) {
+			if (onTrayThread) {
+				SendMessageW(gTrayNotifyIconData.hWnd, WM_RESTORE_WINDOW, (WPARAM)hw, (LPARAM)op_);
+				windowChanged = true;
+			} else if (PostMessageW(gTrayNotifyIconData.hWnd, WM_RESTORE_WINDOW, (WPARAM)hw, (LPARAM)op_)) {
+				windowChanged = true;
+			}
+		}
 		if (toFocus == NULL) toFocus = hw;
 		if (hw == gProfiles[profileId].ForegroundWindow) toFocus = hw;
 	}
 	if (toFocus) {
-		// Keep window enumeration off the hook thread, then return restoration
-		// and activation to the main thread that received the keyboard input.
-		PostMessageW(gTrayNotifyIconData.hWnd, WM_ACTIVATE_WINDOW, (WPARAM)toFocus, 0);
+		// WM_HOTKEY grants foreground activation only while its handler is running.
+		// Dispatch synchronously on the tray thread; the LL-hook fallback still posts.
+		if (onTrayThread)
+			SendMessageW(gTrayNotifyIconData.hWnd, WM_ACTIVATE_WINDOW, (WPARAM)toFocus, 0);
+		else
+			PostMessageW(gTrayNotifyIconData.hWnd, WM_ACTIVATE_WINDOW, (WPARAM)toFocus, 0);
 	}
 	gProfiles[profileId].NumHiddenWindows = 0;
 	return windowChanged;
@@ -815,12 +842,16 @@ void HandleProfile(int profileId, bool trigger) {
 	}
 }
 
-void DispatchHotkey(int hkID)
+void DispatchHotkey(int hkID, LONG expectedGeneration)
 {
 	UpdateProcessIDs();
 	UpdateWindowProcessIDs();
 
 	EnterCriticalSection(&gHotkeyLock);
+	if (expectedGeneration != gHotkeyGeneration || hkID < 0 || hkID >= gNumHotkeys) {
+		LeaveCriticalSection(&gHotkeyLock);
+		return;
+	}
 	int ids[MAX_PROFILES]; int n = gHotkeys[hkID].NumProfileIDs;
 	for (int i = 0; i < n; i++) ids[i] = gHotkeys[hkID].ProfileIDs[i];
 	LeaveCriticalSection(&gHotkeyLock);
@@ -912,7 +943,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			EnterCriticalSection(&gHotkeyLock);
 			int matchIndex = -1;
 			for (int i = 0; i < gNumHotkeys; i++) {
-				if (gHotkeys[i].HotKey == vkCode) {
+				if (!gHotkeys[i].Registered && gHotkeys[i].HotKey == vkCode) {
 					// Use GetAsyncKeyState for modifiers: it reflects actual hardware state,
 					// unlike GetKeyState which depends on the thread's message-queue processing
 					// and can lag in LL hook context (causing missed hotkeys in some apps).
@@ -934,7 +965,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			if (matchIndex >= 0) {
 				if (down && !gHotkeyHeld[matchIndex]) {
 					gHotkeyHeld[matchIndex] = true;
-					Job j = { JOB_TOGGLE_HOTKEY, matchIndex };
+					Job j = { JOB_TOGGLE_HOTKEY, matchIndex, gHotkeyGeneration };
 					JobQueuePush(j);
 				} else if (!down) {
 					gHotkeyHeld[matchIndex] = false;
@@ -960,6 +991,12 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 
 	switch (Message)
 	{
+		case WM_HOTKEY:
+		{
+			LONG generation = InterlockedCompareExchange(&gHotkeyGeneration, 0, 0);
+			DispatchHotkey((int)WParam, generation);
+			break;
+		}
 		case WM_RESTORE_WINDOW:
 		{
 			HWND target = (HWND)WParam;
@@ -973,9 +1010,9 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 		{
 			HWND target = (HWND)WParam;
 			if (IsWindow(target)) {
-				if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
 				BOOL activated = SetForegroundWindow(target);
-				BringWindowToTop(target);
+				SetWindowPos(target, HWND_TOP, 0, 0, 0, 0,
+				             SWP_NOMOVE | SWP_NOSIZE | SWP_ASYNCWINDOWPOS);
 				CrashLog("[focus] target=%p activated=%d foreground=%p\n",
 				         (void*)target, activated, (void*)GetForegroundWindow());
 			}
@@ -991,6 +1028,7 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 				FixStartupPathIfStale();
 				HMENU menu = CreatePopupMenu();
 				AppendMenuW(menu, MF_STRING, IDM_SETTINGS, L"Settings...");
+				AppendMenuW(menu, MF_STRING, IDM_UNHIDE, L"Unhide hidden apps");
 				AppendMenuW(menu, MF_STRING | (IsStartupEnabled() ? MF_CHECKED : 0),
 				            IDM_STARTUP, L"Run at Windows startup");
 				AppendMenuW(menu, MF_STRING, IDM_INSTALL, L"Install to user programs...");
@@ -1009,6 +1047,20 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 		{
 			switch (LOWORD(WParam)) {
 				case IDM_SETTINGS: ShowSettingsWindow(GetModuleHandleW(NULL), Window); break;
+				case IDM_UNHIDE:
+				{
+					bool resumed = gNumPausedProcesses > 0;
+					while (gNumPausedProcesses > 0)
+						ResumeProcess(gPausedProcesses[0]);
+					if (resumed) Sleep(10);
+					for (int i = 0; i < gNumProfiles; i++) {
+						int op = gProfiles[i].Operation;
+						if (gProfiles[i].NumHiddenWindows > 0 &&
+						    (op == PROF_OP_HIDE || op == PROF_OP_PAUSE))
+							RestoreWindowsForPofile(i);
+					}
+					break;
+				}
 				case IDM_STARTUP:  SetStartupEnabled(!IsStartupEnabled()); break;
 				case IDM_INSTALL:  InstallToUserPrograms(Window); break;
 				case IDM_OPENINI:  OpenConfigFolder(); break;
@@ -1036,6 +1088,10 @@ static FILE* gCrashLog = NULL;
 
 void CrashLog(const char* fmt, ...) {
     if (!gCrashLog) return;
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    fprintf(gCrashLog, "%02u:%02u:%02u.%03u ", now.wHour, now.wMinute,
+            now.wSecond, now.wMilliseconds);
     va_list a; va_start(a, fmt); vfprintf(gCrashLog, fmt, a); va_end(a);
     fflush(gCrashLog);
 }
@@ -1068,7 +1124,7 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 	{
 		char p[MAX_PATH]; GetTempPathA(MAX_PATH, p);
 		strcat_s(p, MAX_PATH, "uac-crash.txt");
-		fopen_s(&gCrashLog, p, "w");
+		gCrashLog = _fsopen(p, "w", 0x40 /* allow other processes to read the log */);
 		SetUnhandledExceptionFilter(UnhandledCrash);
 		CrashLog("=== UAC crash log started ===\n");
 	}
@@ -1178,6 +1234,7 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 
 		gTrayNotifyIconData.cbSize = sizeof(NOTIFYICONDATA);
 		gTrayNotifyIconData.hWnd = HWnd;
+		RegisterSystemHotkeys();
 		gTrayNotifyIconData.uID = 1982;
 		gTrayNotifyIconData.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
 		gTrayNotifyIconData.uCallbackMessage = WM_TRAYICON;
@@ -1303,7 +1360,7 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 			for (int j = 0; j < gProfiles[i].NumHiddenWindows; j++) {
 				HWND hw = gProfiles[i].HiddenWindows[j];
 				if (IsWindow(hw))
-					ShowWindow(hw, SW_SHOW);
+					ShowWindowAsync(hw, SW_SHOW);
 			}
 		}
 		gProfiles[i].NumHiddenWindows = 0;

@@ -118,6 +118,7 @@ static LRESULT HandleCtlColor(UINT msg, WPARAM wp, LPARAM lp) {
 HWND gSettingsWnd = NULL;
 volatile BOOL gHotkeyEditActive = FALSE; // TRUE while hotkey edit has focus; read from LL hook
 static int gSelected = -1;
+static BOOL gLoadingFields = FALSE;
 
 static LRESULT CALLBACK SettingsProc(HWND, UINT, WPARAM, LPARAM);
 static void ShowPresetEditor(HWND parent);   // preset management dialog
@@ -186,6 +187,7 @@ static void EnableProfileControls(HWND wnd, BOOL enable) {
 }
 
 static void LoadSelectionToFields(HWND wnd, int idx) {
+    gLoadingFields = TRUE;
     gSelected = idx;
     if (idx < 0 || idx >= gNumProfiles) {
         SetDlgItemTextW(wnd, IDC_NAME,   L"");
@@ -197,6 +199,7 @@ static void LoadSelectionToFields(HWND wnd, int idx) {
                        gDisplayControlEnabled ? BST_CHECKED : BST_UNCHECKED);
         EnableProfileControls(wnd, FALSE);
         RefreshPresetCombo(wnd, -1);
+        gLoadingFields = FALSE;
         return;
     }
     EnableProfileControls(wnd, TRUE);
@@ -218,6 +221,7 @@ static void LoadSelectionToFields(HWND wnd, int idx) {
     CheckDlgButton(wnd, IDC_DISPLAYCTL,
                    gDisplayControlEnabled ? BST_CHECKED : BST_UNCHECKED);
     RefreshPresetCombo(wnd, idx);
+    gLoadingFields = FALSE;
 }
 
 static HWND MakeChild(HWND parent, const wchar_t* cls, const wchar_t* text,
@@ -854,10 +858,8 @@ static LRESULT CALLBACK PresetEditorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM l
                     {
                         static const BYTE kCands[] = { 0xE2, 0xDC, 0x14 };
                         for (int ci = 0; ci < 3; ci++) {
-                            DWORD vt=0,vc=0,vm=0; BOOL ok2=FALSE;
-                            __try { ok2 = GetVCPFeatureAndVCPFeatureReply(
-                                DisplayGetPrimaryHandle(), kCands[ci], &vt, &vc, &vm); }
-                            __except(EXCEPTION_EXECUTE_HANDLER){ok2=FALSE;}
+                            DWORD vc=0,vm=0; BOOL ok2=FALSE;
+                            DisplayProbeVcp(kCands[ci], &ok2, &vc, &vm);
                             if (ok2 && vm > 1 && (int)vc == vcpCode) { usedReg=kCands[ci]; break; }
                         }
                     }
@@ -986,7 +988,8 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 if (nh->code == LVN_ITEMCHANGED) {
                     LPNMLISTVIEW nv = (LPNMLISTVIEW)lp;
-                    if ((nv->uChanged & LVIF_STATE) && (nv->uNewState & LVIS_SELECTED))
+                    if ((nv->uChanged & LVIF_STATE) && (nv->uNewState & LVIS_SELECTED) &&
+                        (int)nv->lParam != gSelected)
                         LoadSelectionToFields(wnd, (int)nv->lParam);
                 }
             }
@@ -998,7 +1001,7 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             switch (id) {
                 case IDC_NAME:
                 case IDC_HOTKEY:
-                    if (code == EN_KILLFOCUS) ApplyFieldsToSelection(wnd);
+                    if (code == EN_CHANGE && !gLoadingFields) ApplyFieldsToSelection(wnd);
                     break;
                 case IDC_OPERATION:
                     if (code == CBN_SELCHANGE) ApplyFieldsToSelection(wnd);

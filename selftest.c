@@ -3,10 +3,9 @@
 #include <string.h>
 #include <physicalmonitorenumerationapi.h>
 #include <highlevelmonitorconfigurationapi.h>
-#include <objbase.h>
+#include <lowlevelmonitorconfigurationapi.h>
 #include "display.h"
 #pragma comment(lib, "Dxva2.lib")
-#pragma comment(lib, "ole32.lib")
 #include "selftest.h"
 #include "config.h"
 #include "worker.h"
@@ -163,31 +162,6 @@ static BOOL CALLBACK DbgMonitorEnum(HMONITOR hm, HDC hdc, LPRECT r, LPARAM lp) {
     return TRUE;
 }
 
-// --- Thread-safety test state ---
-static volatile BOOL gTtDone   = FALSE;
-static volatile BOOL gTtResult = FALSE;
-static DISPLAY_PRESET gTtPreset;  // shared with test threads
-
-static DWORD WINAPI BgThreadNoComProc(LPVOID p) {
-    (void)p;
-    MdLog("[BgThread-NoCOM] start, calling DisplayApplyPreset...\n");
-    BOOL r = DisplayApplyPreset(NULL, &gTtPreset, true);
-    MdLog("[BgThread-NoCOM] returned %d\n", r);
-    gTtResult = r; gTtDone = TRUE;
-    return 0;
-}
-
-static DWORD WINAPI BgThreadWithComProc(LPVOID p) {
-    (void)p;
-    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    MdLog("[BgThread-WithCOM] CoInitializeEx hr=0x%08X\n", (unsigned)hr);
-    BOOL r = DisplayApplyPreset(NULL, &gTtPreset, true);
-    MdLog("[BgThread-WithCOM] returned %d\n", r);
-    CoUninitialize();
-    gTtResult = r; gTtDone = TRUE;
-    return 0;
-}
-
 // STEP: log label and flush BEFORE the call; result logged AFTER.
 // If the process crashes, the log shows the last STEP that ran.
 #define STEP(s)      MdLog("  >> " s "... ")
@@ -204,6 +178,7 @@ int RunMonitorDebug(void) {
 
     MdLog("=== UniversalAppControl Monitor DDC/CI Debug ===\n");
     MdLog("Log: %s\n", logPath);
+    MdLog("Read-only probe: this command never changes monitor settings.\n");
     MdLog("Each DDC/CI call is logged BEFORE it runs.\n");
     MdLog("Last line before a crash = the culprit.\n\n");
 
@@ -272,7 +247,8 @@ int RunMonitorDebug(void) {
                         // --- Probe VCP 0xDC (Preset Mode / Display Mode) ---
                         MdLog("\n  [VCP 0xDC - Preset/Display Mode]\n");
                         {
-                            DWORD dType=0, dCur=0, dMax=0; BOOL dok=FALSE; DWORD dSeh=0;
+                            MC_VCP_CODE_TYPE dType = MC_MOMENTARY;
+                            DWORD dCur=0, dMax=0; BOOL dok=FALSE; DWORD dSeh=0;
                             STEP("GetVCPFeatureAndVCPFeatureReply(0xDC)");
                             __try { dok = GetVCPFeatureAndVCPFeatureReply(h, 0xDC, &dType, &dCur, &dMax); }
                             __except(dSeh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){dok=FALSE;}
@@ -301,21 +277,14 @@ int RunMonitorDebug(void) {
                                     }
                                     MdLog("\n");
                                 }
-                                // Try SetVCPFeature idempotent
-                                BOOL sdc=FALSE;
-                                STEP("SetVCPFeature(0xDC, cur)");
-                                __try { sdc = SetVCPFeature(h, 0xDC, dCur); }
-                                __except(dSeh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){sdc=FALSE;}
-                                if (dSeh) CRASH_(dSeh);
-                                else if (sdc) OK_;
-                                else FAIL_(GetLastError());
                             } else { MdLog(" FAILED err=0x%lx\n", GetLastError()); }
                         }
 
                         // --- Probe VCP 0xF0 (11-profile Preset Mode) ---
                         MdLog("\n  [VCP 0xF0 - Preset Mode (11 profiles)]\n");
                         {
-                            DWORD fType=0,fCur=0,fMax=0; BOOL fok=FALSE; DWORD fSeh=0;
+                            MC_VCP_CODE_TYPE fType = MC_MOMENTARY;
+                            DWORD fCur=0,fMax=0; BOOL fok=FALSE; DWORD fSeh=0;
                             STEP("GetVCPFeatureAndVCPFeatureReply(0xF0)");
                             __try { fok = GetVCPFeatureAndVCPFeatureReply(h,0xF0,&fType,&fCur,&fMax); }
                             __except(fSeh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){fok=FALSE;}
@@ -339,13 +308,6 @@ int RunMonitorDebug(void) {
                                     }
                                     MdLog("\n");
                                 }
-                                BOOL sof=FALSE;
-                                STEP("SetVCPFeature(0xF0, cur)");
-                                __try{sof=SetVCPFeature(h,0xF0,fCur);}
-                                __except(fSeh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){sof=FALSE;}
-                                if(fSeh)CRASH_(fSeh);
-                                else if(sof)OK_;
-                                else FAIL_(GetLastError());
                             } else { MdLog(" FAILED err=0x%lx\n",GetLastError()); }
                         }
                     } else { FAIL_(GetLastError()); }
@@ -363,13 +325,6 @@ int RunMonitorDebug(void) {
             else if (ok) MdLog("OK  cur=%lu  min=%lu  max=%lu\n", bCur, bMin, bMax);
             else FAIL_(GetLastError());
 
-            if (ok) {
-                STEP("SetMonitorBrightness(cur)"); seh=0;
-                __try { ok = SetMonitorBrightness(h, bCur); }
-                __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
-                if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
-            }
-
             // Contrast
             DWORD cMin=0, cCur=0, cMax=0;
             MdLog("\n  [Contrast]\n");
@@ -379,13 +334,6 @@ int RunMonitorDebug(void) {
             if (seh) CRASH_(seh);
             else if (ok) MdLog("OK  cur=%lu  min=%lu  max=%lu\n", cCur, cMin, cMax);
             else FAIL_(GetLastError());
-
-            if (ok) {
-                STEP("SetMonitorContrast(cur)"); seh=0;
-                __try { ok = SetMonitorContrast(h, cCur); }
-                __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
-                if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
-            }
 
             // Color temperature - try unconditionally even if not in caps
             MC_COLOR_TEMPERATURE ct = MC_COLOR_TEMPERATURE_UNKNOWN;
@@ -398,37 +346,11 @@ int RunMonitorDebug(void) {
             else if (ok) MdLog("OK  ct=%s (%d)\n", CtName(ct), (int)ct);
             else MdLog("FAILED (0x%08X) -- not supported\n", GetLastError());
 
-            if (ok && ct != MC_COLOR_TEMPERATURE_UNKNOWN) {
-                STEP("SetMonitorColorTemperature(cur)"); seh=0;
-                __try { ok = SetMonitorColorTemperature(h, ct); }
-                __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
-                if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
-            }
-
-            // Combined sequence: B then C then CT
-            MdLog("\n  [Combined B+C+CT sequence]\n");
-            STEP("SetMonitorBrightness"); seh=0;
-            __try { ok = SetMonitorBrightness(h, bCur); }
-            __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
-            if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
-
-            STEP("SetMonitorContrast"); seh=0;
-            __try { ok = SetMonitorContrast(h, cCur); }
-            __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
-            if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
-
-            if (ct != MC_COLOR_TEMPERATURE_UNKNOWN) {
-                STEP("SetMonitorColorTemperature (after B+C)"); seh=0;
-                __try { ok = SetMonitorColorTemperature(h, ct); }
-                __except(seh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER){ok=FALSE;}
-                if (seh) CRASH_(seh); else if (ok) OK_; else FAIL_(GetLastError());
-            }
-            MdLog("  Combined sequence complete.\n");
-
             // --- VCP 0x14 low-level color preset ---
             MdLog("\n  [VCP 0x14 Color Preset (low-level DDC/CI)]\n");
             {
-                DWORD vcpType=0, vcpCur=0, vcpMax=0;
+                MC_VCP_CODE_TYPE vcpType = MC_MOMENTARY;
+                DWORD vcpCur=0, vcpMax=0;
                 BOOL vok = FALSE; int vseh = 0;
                 STEP("GetVCPFeatureAndVCPFeatureReply(0x14)"); vseh=0;
                 __try { vok = GetVCPFeatureAndVCPFeatureReply(h, 0x14, &vcpType, &vcpCur, &vcpMax); }
@@ -438,15 +360,6 @@ int RunMonitorDebug(void) {
                     const char* ctNames[] = {"?","sRGB","Native","4000K","5000K","6500K","7500K","8200K","9300K","10000K","11500K","Custom"};
                     MdLog(" OK  cur=0x%02lX (%s) max=%lu\n", vcpCur,
                           (vcpCur < 12) ? ctNames[vcpCur] : "?", vcpMax);
-
-                    // Idempotent write: set same value back
-                    BOOL sok = FALSE; vseh=0;
-                    STEP("SetVCPFeature(0x14, cur)");
-                    __try { sok = SetVCPFeature(h, 0x14, vcpCur); }
-                    __except(vseh=GetExceptionCode(),EXCEPTION_EXECUTE_HANDLER) { sok=FALSE; }
-                    if (vseh) CRASH_(vseh);
-                    else if (sok) OK_;
-                    else FAIL_(GetLastError());
                 }
                 else { MdLog(" FAILED  err=0x%lx (no VCP 0x14 support)\n", GetLastError()); }
             }
@@ -455,81 +368,6 @@ int RunMonitorDebug(void) {
         DestroyPhysicalMonitors(nPhys, pms);
         free(pms);
     }
-
-    // --- Thread-safety test ---
-    // Prove that DDC/CI works (or fails) from a background thread,
-    // both with and without COM initialized — mimics the worker thread path.
-    MdLog("\n--- Thread-safety test (mimics worker thread) ---\n");
-
-    DisplayInit();
-    MdLog("DisplayInit() done\n");
-
-    // Build preset from current values so Apply has no visible effect
-    memset(&gTtPreset, 0, sizeof(gTtPreset));
-    wcscpy_s(gTtPreset.Name, MAX_NAME, L"__thread_test__");
-    gTtPreset.Brightness = PRESET_UNSET;
-    gTtPreset.Contrast   = PRESET_UNSET;
-    gTtPreset.ColorTemp  = PRESET_UNSET;
-    if (gDbgHmonCount > 0) {
-        PHYSICAL_MONITOR pm[MAX_PHYSICAL_PER_HMONITOR]; DWORD nc = 0;
-        if (GetNumberOfPhysicalMonitorsFromHMONITOR(gDbgHmons[0], &nc) && nc > 0
-            && GetPhysicalMonitorsFromHMONITOR(gDbgHmons[0], nc, pm)) {
-            DWORD mn, cur, mx;
-            if (GetMonitorBrightness(pm[0].hPhysicalMonitor, &mn, &cur, &mx) && mx > mn) {
-                int pct = (int)(cur * 100 / mx);
-                // Offset by +1 so Set* is actually called (not a no-op)
-                gTtPreset.Brightness = (pct >= 100) ? pct - 1 : pct + 1;
-                MdLog("  Brightness actual=%d%%, preset=%d%% (to force Set call)\n",
-                      pct, gTtPreset.Brightness);
-            }
-            if (GetMonitorContrast(pm[0].hPhysicalMonitor, &mn, &cur, &mx) && mx > mn) {
-                int pct = (int)(cur * 100 / mx);
-                gTtPreset.Contrast = (pct >= 100) ? pct - 1 : pct + 1;
-                MdLog("  Contrast   actual=%d%%, preset=%d%% (to force Set call)\n",
-                      pct, gTtPreset.Contrast);
-            }
-            DestroyPhysicalMonitors(nc, pm);
-        }
-    }
-    int bOrig = gTtPreset.Brightness - 1;  // original value (we added +1 above)
-    int cOrig = gTtPreset.Contrast   - 1;
-    MdLog("Preset B=%d C=%d CT=%d  (original B=%d C=%d)\n",
-          gTtPreset.Brightness, gTtPreset.Contrast, gTtPreset.ColorTemp,
-          bOrig, cOrig);
-
-    // Test 1: main thread, apply +1 offset
-    MdLog("\nTest1: MAIN THREAD  set B=%d C=%d ...\n",
-          gTtPreset.Brightness, gTtPreset.Contrast);
-    bool r1 = DisplayApplyPreset(NULL, &gTtPreset, true);
-    MdLog("Test1: %s  (expected OK - Set must be called)\n", r1 ? "OK (Set called)" : "no-op UNEXPECTED");
-
-    // Test 2: background thread, NO COM -- restore original values (B-1, C-1)
-    // After Test1 the monitor is at +1; setting back to original calls Set* again.
-    gTtPreset.Brightness = bOrig;
-    gTtPreset.Contrast   = cOrig;
-    MdLog("\nTest2: BACKGROUND THREAD (no COM)  set B=%d C=%d ...\n",
-          gTtPreset.Brightness, gTtPreset.Contrast);
-    gTtDone = FALSE; gTtResult = FALSE;
-    HANDLE t2 = CreateThread(NULL, 0, BgThreadNoComProc, NULL, 0, NULL);
-    if (t2) { WaitForSingleObject(t2, 15000); CloseHandle(t2); }
-    MdLog("Test2: %s\n",
-          gTtDone ? (gTtResult ? "OK (Set called from bg thread!)" : "no-op UNEXPECTED")
-                  : "TIMED OUT / CRASHED");
-
-    // Test 3: background thread, WITH COM -- bump back to +1
-    gTtPreset.Brightness = bOrig + 1;
-    gTtPreset.Contrast   = cOrig + 1;
-    MdLog("\nTest3: BACKGROUND THREAD (with COM)  set B=%d C=%d ...\n",
-          gTtPreset.Brightness, gTtPreset.Contrast);
-    gTtDone = FALSE; gTtResult = FALSE;
-    HANDLE t3 = CreateThread(NULL, 0, BgThreadWithComProc, NULL, 0, NULL);
-    if (t3) { WaitForSingleObject(t3, 15000); CloseHandle(t3); }
-    MdLog("Test3: %s\n",
-          gTtDone ? (gTtResult ? "OK (Set called from bg thread with COM!)" : "no-op UNEXPECTED")
-                  : "TIMED OUT / CRASHED");
-
-    DisplayRestoreAll();
-    MdLog("DisplayRestoreAll() done - monitor brightness/contrast restored\n");
     MdLog("\n=== COMPLETE ===\n");
     fclose(gMdLog); gMdLog = NULL;
     return 0;

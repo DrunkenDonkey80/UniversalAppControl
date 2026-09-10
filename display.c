@@ -6,11 +6,13 @@
 #endif
 
 #include "display.h"
+#include "config.h"
 #include <Windows.h>
 #include <physicalmonitorenumerationapi.h>
 #include <highlevelmonitorconfigurationapi.h>
 #include <lowlevelmonitorconfigurationapi.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #pragma comment(lib, "Dxva2.lib")
@@ -32,6 +34,7 @@ typedef struct {
 static PrimState         gPrim       = {0};
 static HMONITOR          gPrimaryHM  = NULL;
 static CRITICAL_SECTION  gMonLock;
+static CRITICAL_SECTION  gDdcLock;   // serialize the single physical DDC/CI bus
 static bool              gMonInited  = false;
 
 // -----------------------------------------------------------------------
@@ -48,6 +51,7 @@ static bool              gMonInited  = false;
 #define DDC_POST_WRITE_MS  80    // additional gap after a write
 #define DDC_PRESET_WRITE_MS 2000 // F0/picture-mode needs this per ddccontrol-db DEL41DA.xml delay="2000"
 #define DDC_RETRIES        3     // ddccontrol retries reads 3x
+#define DDC_OPEN_RETRY_MS  250   // physical-monitor handles can be transiently unavailable
 
 static ULONGLONG gLastDdcOpTick = 0;
 
@@ -60,24 +64,133 @@ static void DdcciStampOp(void) { gLastDdcOpTick = GetTickCount64(); }
 
 // Retrying read.  Returns TRUE on success.  Logs all failures.
 static BOOL DdcciGetFeature(HANDLE h, BYTE vcp, DWORD* pType, DWORD* pCur, DWORD* pMax) {
+    EnterCriticalSection(&gDdcLock);
     for (int attempt = 1; attempt <= DDC_RETRIES; attempt++) {
         DdcciWaitInterOp();
         BOOL ok = FALSE;
-        DWORD vt=0, vc=0, vm=0;
+        MC_VCP_CODE_TYPE vt = MC_MOMENTARY;
+        DWORD vc=0, vm=0;
         __try { ok = GetVCPFeatureAndVCPFeatureReply(h, vcp, &vt, &vc, &vm); }
         __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
         DdcciStampOp();
         if (ok) {
-            if (pType) *pType = vt;
+            if (pType) *pType = (DWORD)vt;
             if (pCur)  *pCur  = vc;
             if (pMax)  *pMax  = vm;
             if (attempt > 1) CrashLog("[ddc] Read VCP=0x%02X ok on attempt %d\n", vcp, attempt);
+            LeaveCriticalSection(&gDdcLock);
             return TRUE;
         }
         CrashLog("[ddc] Read VCP=0x%02X attempt %d/%d FAILED\n", vcp, attempt, DDC_RETRIES);
         Sleep(20); // small extra delay between retries
     }
+    LeaveCriticalSection(&gDdcLock);
     return FALSE;
+}
+
+// GetMonitorCapabilities is also a DDC/CI transaction and can fail while a
+// monitor is waking.  Do not turn one transient startup failure into a
+// session-long "DDC/CI disabled" result.
+static BOOL DdcciGetCapabilities(HANDLE h, DWORD* caps, DWORD* colorCaps) {
+    EnterCriticalSection(&gDdcLock);
+    for (int attempt = 1; attempt <= DDC_RETRIES; attempt++) {
+        DWORD c = 0, cc = 0;
+        DdcciWaitInterOp();
+        BOOL ok = FALSE;
+        __try { ok = GetMonitorCapabilities(h, &c, &cc); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+        DdcciStampOp();
+        if (ok) {
+            *caps = c;
+            *colorCaps = cc;
+            if (attempt > 1) CrashLog("[ddc] GetMonitorCapabilities ok on attempt %d\n", attempt);
+            LeaveCriticalSection(&gDdcLock);
+            return TRUE;
+        }
+        CrashLog("[ddc] GetMonitorCapabilities attempt %d/%d FAILED\n", attempt, DDC_RETRIES);
+        Sleep(20);
+    }
+    LeaveCriticalSection(&gDdcLock);
+    return FALSE;
+}
+
+static BOOL DdcciGetCapabilitiesStringLength(HANDLE h, DWORD* length) {
+    EnterCriticalSection(&gDdcLock);
+    BOOL ok = FALSE;
+    for (int attempt = 1; attempt <= DDC_RETRIES && !ok; attempt++) {
+        DdcciWaitInterOp();
+        __try { ok = GetCapabilitiesStringLength(h, length); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+        DdcciStampOp();
+        if (!ok) Sleep(20);
+    }
+    LeaveCriticalSection(&gDdcLock);
+    return ok;
+}
+
+static BOOL DdcciGetCapabilitiesString(HANDLE h, char* value, DWORD length) {
+    EnterCriticalSection(&gDdcLock);
+    BOOL ok = FALSE;
+    for (int attempt = 1; attempt <= DDC_RETRIES && !ok; attempt++) {
+        DdcciWaitInterOp();
+        __try { ok = CapabilitiesRequestAndCapabilitiesReply(h, value, length); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+        DdcciStampOp();
+        if (!ok) Sleep(20);
+    }
+    LeaveCriticalSection(&gDdcLock);
+    return ok;
+}
+
+typedef BOOL (WINAPI *MonitorRangeGetter)(HANDLE, LPDWORD, LPDWORD, LPDWORD);
+typedef BOOL (WINAPI *MonitorRangeSetter)(HANDLE, DWORD);
+
+static BOOL DdcciGetRange(HANDLE h, MonitorRangeGetter getter,
+                          DWORD* minimum, DWORD* current, DWORD* maximum) {
+    EnterCriticalSection(&gDdcLock);
+    BOOL ok = FALSE;
+    for (int attempt = 1; attempt <= DDC_RETRIES && !ok; attempt++) {
+        DdcciWaitInterOp();
+        SetLastError(ERROR_SUCCESS);
+        __try { ok = getter(h, minimum, current, maximum); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+        DWORD error = GetLastError();
+        DdcciStampOp();
+        if (!ok) {
+            CrashLog("[ddc] GetRange attempt %d/%d FAILED err=%lu\n",
+                     attempt, DDC_RETRIES, error);
+            Sleep(20);
+        }
+    }
+    LeaveCriticalSection(&gDdcLock);
+    return ok;
+}
+
+static BOOL DdcciSetRange(HANDLE h, MonitorRangeSetter setter, DWORD value) {
+    EnterCriticalSection(&gDdcLock);
+    DdcciWaitInterOp();
+    BOOL ok = FALSE;
+    SetLastError(ERROR_SUCCESS);
+    __try { ok = setter(h, value); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+    DWORD error = GetLastError();
+    DdcciStampOp();
+    Sleep(DDC_POST_WRITE_MS);
+    if (!ok) CrashLog("[ddc] SetRange value=%lu FAILED err=%lu\n", value, error);
+    LeaveCriticalSection(&gDdcLock);
+    return ok;
+}
+
+static BOOL DdcciSetFeature(HANDLE h, BYTE vcp, DWORD value) {
+    EnterCriticalSection(&gDdcLock);
+    DdcciWaitInterOp();
+    BOOL ok = FALSE;
+    __try { ok = SetVCPFeature(h, vcp, value); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+    DdcciStampOp();
+    Sleep(vcp == 0xF0 ? DDC_PRESET_WRITE_MS : DDC_POST_WRITE_MS);
+    LeaveCriticalSection(&gDdcLock);
+    return ok;
 }
 
 // Dell S-series / gaming-monitor F0 picture-mode codes.
@@ -122,6 +235,7 @@ static BOOL DdcciSetFeatureVerified(HANDLE h, BYTE vcp, DWORD want) {
         return FALSE;
     }
 
+    EnterCriticalSection(&gDdcLock);
     DdcciWaitInterOp();
     BOOL setOk = FALSE;
     __try { setOk = SetVCPFeature(h, vcp, want); }
@@ -134,25 +248,22 @@ static BOOL DdcciSetFeatureVerified(HANDLE h, BYTE vcp, DWORD want) {
 
     if (!setOk) {
         CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX SetVCPFeature FAILED\n", vcp, want);
+        LeaveCriticalSection(&gDdcLock);
         return FALSE;
     }
 
-    // SAVE — ddccontrol equivalent of DDCCI_COMMAND_SAVE (0x0C)
-    BOOL saveOk = FALSE;
-    __try { saveOk = SaveCurrentMonitorSettings(h); }
-    __except(EXCEPTION_EXECUTE_HANDLER) { saveOk = FALSE; }
-    DdcciStampOp();
-    Sleep(DDC_POST_WRITE_MS);
-
+    // Automatic app-driven changes are intentionally not persisted to monitor
+    // NVRAM; the app restores its snapshot when it exits.
     if (vcp == 0xF0) {
         // Command register: verify via E2 (the actual visible-mode state register)
         DWORD evt=0, ecur=0, emax=0;
         BOOL eok = DdcciGetFeature(h, 0xE2, &evt, &ecur, &emax);
-        CrashLog("[ddc] Write F0=0x%02lX save=%d E2=%s0x%02lX\n",
-                 want, saveOk, eok ? "" : "(read fail) ", ecur);
+        CrashLog("[ddc] Write F0=0x%02lX E2=%s0x%02lX\n",
+                 want, eok ? "" : "(read fail) ", ecur);
         // We can't tell from caps whether E2 should equal F0_input or some
         // other mapped value, so we can't fail the call.  Caller compares E2
         // before/after across multiple Apply attempts to discover the mapping.
+        LeaveCriticalSection(&gDdcLock);
         return TRUE;
     } else {
         // Value/list register: readback should match the value we wrote
@@ -164,7 +275,8 @@ static BOOL DdcciSetFeatureVerified(HANDLE h, BYTE vcp, DWORD want) {
         } else {
             CrashLog("[ddc] Write VCP=0x%02X val=0x%02lX (no readback)\n", vcp, want);
         }
-        return TRUE;
+        LeaveCriticalSection(&gDdcLock);
+        return readOk && got == want;
     }
 }
 
@@ -238,15 +350,48 @@ static BOOL CALLBACK FindPrimaryProc(HMONITOR hm, HDC dc, LPRECT r, LPARAM lp) {
     return TRUE;
 }
 
-// Open physical monitors for the primary HMONITOR.
+// Reacquire the primary HMONITOR on every attempt: its handle can become stale
+// after display power/topology changes even when no WM_DISPLAYCHANGE arrives.
 // Caller must DestroyPhysicalMonitors when done.
 static DWORD OpenPrimaryPhysicals(PHYSICAL_MONITOR* arr, DWORD maxn) {
-    if (!gPrimaryHM) return 0;
-    DWORD n = 0;
-    if (!GetNumberOfPhysicalMonitorsFromHMONITOR(gPrimaryHM, &n)) return 0;
-    if (n == 0 || n > maxn) return 0;
-    if (!GetPhysicalMonitorsFromHMONITOR(gPrimaryHM, n, arr)) return 0;
-    return n;
+    for (int attempt = 1; attempt <= DDC_RETRIES; attempt++) {
+        HMONITOR primary = NULL;
+        DWORD n = 0;
+        const char* failedAt = "EnumDisplayMonitors";
+        SetLastError(ERROR_SUCCESS);
+        // FindPrimaryProc intentionally returns FALSE after finding the primary,
+        // so EnumDisplayMonitors also returns FALSE on the successful path.
+        EnumDisplayMonitors(NULL, NULL, FindPrimaryProc, (LPARAM)&primary);
+        DWORD error = GetLastError();
+        BOOL ok = primary != NULL;
+
+        if (primary) {
+            gPrimaryHM = primary;
+            failedAt = "GetNumberOfPhysicalMonitorsFromHMONITOR";
+            SetLastError(ERROR_SUCCESS);
+            ok = GetNumberOfPhysicalMonitorsFromHMONITOR(primary, &n);
+            error = GetLastError();
+        }
+        if (ok && primary && n > 0 && n <= maxn) {
+            failedAt = "GetPhysicalMonitorsFromHMONITOR";
+            SetLastError(ERROR_SUCCESS);
+            ok = GetPhysicalMonitorsFromHMONITOR(primary, n, arr);
+            error = GetLastError();
+            if (ok) {
+                if (attempt > 1)
+                    CrashLog("[display] OpenPrimaryPhysicals recovered on attempt %d\n", attempt);
+                return n;
+            }
+        } else if (ok && primary) {
+            failedAt = "physical monitor count";
+            error = ERROR_INVALID_DATA;
+        }
+
+        CrashLog("[display] OpenPrimaryPhysicals attempt %d/%d FAILED at %s err=%lu hm=%p count=%lu\n",
+                 attempt, DDC_RETRIES, failedAt, error, (void*)primary, n);
+        if (attempt < DDC_RETRIES) Sleep(DDC_OPEN_RETRY_MS);
+    }
+    return 0;
 }
 
 // Map a ColorTemp preset value to a VCP 0x14 code to send.
@@ -429,10 +574,8 @@ void DisplayProbeVcp(BYTE vcpCode, BOOL* outOk, DWORD* outCur, DWORD* outMax) {
     DWORD n = OpenPrimaryPhysicals(pm, MAX_PHYSICAL_PER_HMONITOR);
     if (n == 0) return;
     HANDLE h = pm[0].hPhysicalMonitor;
-    DWORD vcpType=0, cur=0, mx=0;
-    BOOL ok = FALSE;
-    __try { ok = GetVCPFeatureAndVCPFeatureReply(h, vcpCode, &vcpType, &cur, &mx); }
-    __except(EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+    DWORD cur=0, mx=0;
+    BOOL ok = DdcciGetFeature(h, vcpCode, NULL, &cur, &mx);
     *outOk = ok; *outCur = cur; *outMax = mx;
     DestroyPhysicalMonitors(n, pm);
 }
@@ -483,12 +626,12 @@ bool DisplayRecordProfile(int vcpReg, int vcpCode) {
 void DisplayInit(void) {
     if (!gMonInited) {
         InitializeCriticalSection(&gMonLock);
+        InitializeCriticalSection(&gDdcLock);
         gMonInited = true;
     }
 
-    // Find the primary HMONITOR
+    // OpenPrimaryPhysicals reacquires the current primary HMONITOR.
     gPrimaryHM = NULL;
-    EnumDisplayMonitors(NULL, NULL, FindPrimaryProc, (LPARAM)&gPrimaryHM);
 
     // Reset last-applied tracking on every init
     DisplayResetLastApplied();
@@ -500,8 +643,6 @@ void DisplayInit(void) {
     gPrimaryVcp14Count = 0;
     LeaveCriticalSection(&gMonLock);
 
-    if (!gPrimaryHM) return;
-
     // Open the primary physical and read capabilities once at startup.
     PHYSICAL_MONITOR pm[MAX_PHYSICAL_PER_HMONITOR];
     DWORD n = OpenPrimaryPhysicals(pm, MAX_PHYSICAL_PER_HMONITOR);
@@ -511,7 +652,7 @@ void DisplayInit(void) {
 
     // High-level caps
     DWORD caps = 0, col = 0;
-    if (GetMonitorCapabilities(h, &caps, &col)) {
+    if (DdcciGetCapabilities(h, &caps, &col)) {
         EnterCriticalSection(&gMonLock);
         gPrim.caps       = caps;
         gPrim.capsProbed = true;
@@ -520,11 +661,11 @@ void DisplayInit(void) {
 
     // VCP 0x14 supported values from capabilities string
     DWORD capLen = 0;
-    if (GetCapabilitiesStringLength(h, &capLen) && capLen > 0) {
+    if (DdcciGetCapabilitiesStringLength(h, &capLen) && capLen > 0) {
         char* capStr = (char*)malloc(capLen + 2);
         if (capStr) {
             capStr[0] = '\0';
-            if (CapabilitiesRequestAndCapabilitiesReply(h, capStr, capLen)) {
+            if (DdcciGetCapabilitiesString(h, capStr, capLen)) {
                 int cnt = 0;
                 BYTE vals[MAX_VCP14_VALS];
                 ParseVcp14Caps(capStr, vals, &cnt);
@@ -613,9 +754,9 @@ void DisplayPopulatePresetsFromCaps(void) {
 
 void DisplayRefresh(void) {
     if (!gMonInited) { DisplayInit(); return; }
-    // Re-probe without clearing the originals snapshot
+    // Re-probe without clearing the originals snapshot.
+    // OpenPrimaryPhysicals reacquires the current primary HMONITOR.
     gPrimaryHM = NULL;
-    EnumDisplayMonitors(NULL, NULL, FindPrimaryProc, (LPARAM)&gPrimaryHM);
 
     EnterCriticalSection(&gMonLock);
     gPrim.caps        = 0;
@@ -625,25 +766,23 @@ void DisplayRefresh(void) {
 
     DisplayResetLastApplied();
 
-    if (!gPrimaryHM) return;
-
     PHYSICAL_MONITOR pm[MAX_PHYSICAL_PER_HMONITOR];
     DWORD n = OpenPrimaryPhysicals(pm, MAX_PHYSICAL_PER_HMONITOR);
     if (n == 0) return;
 
     HANDLE h = pm[0].hPhysicalMonitor;
     DWORD caps = 0, col = 0;
-    if (GetMonitorCapabilities(h, &caps, &col)) {
+    if (DdcciGetCapabilities(h, &caps, &col)) {
         EnterCriticalSection(&gMonLock);
         gPrim.caps = caps; gPrim.capsProbed = true;
         LeaveCriticalSection(&gMonLock);
     }
     DWORD capLen = 0;
-    if (GetCapabilitiesStringLength(h, &capLen) && capLen > 0) {
+    if (DdcciGetCapabilitiesStringLength(h, &capLen) && capLen > 0) {
         char* capStr = (char*)malloc(capLen + 2);
         if (capStr) {
             capStr[0] = '\0';
-            if (CapabilitiesRequestAndCapabilitiesReply(h, capStr, capLen)) {
+            if (DdcciGetCapabilitiesString(h, capStr, capLen)) {
                 int cnt = 0; BYTE vals[MAX_VCP14_VALS];
                 ParseVcp14Caps(capStr, vals, &cnt);
                 EnterCriticalSection(&gMonLock);
@@ -671,6 +810,15 @@ int DisplayListUnsupported(wchar_t names[][128], int maxOut) {
     EnterCriticalSection(&gMonLock);
     bool supported = gPrim.capsProbed && (gPrim.caps & MC_CAPS_BRIGHTNESS);
     LeaveCriticalSection(&gMonLock);
+
+    // Startup may race a sleeping monitor. Re-probe before showing a warning.
+    if (!supported) {
+        DisplayRefresh();
+        EnterCriticalSection(&gMonLock);
+        supported = gPrim.capsProbed && (gPrim.caps & MC_CAPS_BRIGHTNESS);
+        LeaveCriticalSection(&gMonLock);
+    }
+
     if (!supported) {
         wcsncpy_s(names[0], 128, L"Primary monitor", _TRUNCATE);
         return 1;
@@ -701,17 +849,22 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
     DWORD caps = gPrim.caps;
     LeaveCriticalSection(&gMonLock);
 
-    if (!caps) { GetMonitorCapabilities(h, &caps, &(DWORD){0}); }
+    if (!caps) {
+        DWORD colorCaps = 0;
+        DdcciGetCapabilities(h, &caps, &colorCaps);
+    }
 
     DWORD mn, cur, mx;
-    if ((caps & MC_CAPS_BRIGHTNESS) && GetMonitorBrightness(h, &mn, &cur, &mx))
+    if ((caps & MC_CAPS_BRIGHTNESS) &&
+        DdcciGetRange(h, GetMonitorBrightness, &mn, &cur, &mx))
         { out->Brightness = RawToPct(cur, mn, mx); ok = true; }
-    if ((caps & MC_CAPS_CONTRAST)   && GetMonitorContrast(h, &mn, &cur, &mx))
+    if ((caps & MC_CAPS_CONTRAST) &&
+        DdcciGetRange(h, GetMonitorContrast, &mn, &cur, &mx))
         { out->Contrast   = RawToPct(cur, mn, mx); ok = true; }
 
     // Color temperature: VCP 0x14, store raw code (1-12)
-    DWORD vcpType=0, vcpCur=0, vcpMax=0;
-    if (GetVCPFeatureAndVCPFeatureReply(h, 0x14, &vcpType, &vcpCur, &vcpMax) && vcpCur >= 1) {
+    DWORD vcpCur=0, vcpMax=0;
+    if (DdcciGetFeature(h, 0x14, NULL, &vcpCur, &vcpMax) && vcpCur >= 1) {
         out->ColorTemp = (int)vcpCur;
         ok = true;
     }
@@ -747,7 +900,7 @@ bool DisplayCaptureCurrent(HWND hwnd, DISPLAY_PRESET* out) {
 
 bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
     (void)hwnd;  // always primary
-    if (!preset || !gMonInited || !gPrimaryHM) return false;
+    if (!preset || !gMonInited) return false;
 
     CrashLog("[display] ApplyPreset B=%d C=%d CT=%d force=%d\n",
              preset->Brightness, preset->Contrast, preset->ColorTemp, force);
@@ -763,8 +916,10 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
     EnterCriticalSection(&gMonLock);
     if (!gPrim.capsProbed) {
         DWORD c=0, col=0;
-        if (GetMonitorCapabilities(h, &c, &col)) gPrim.caps = c;
-        gPrim.capsProbed = true;
+        if (DdcciGetCapabilities(h, &c, &col)) {
+            gPrim.caps = c;
+            gPrim.capsProbed = true;
+        }
     }
     DWORD caps      = gPrim.caps;
     bool  firstTouch = !gPrim.hasSnapshot;
@@ -819,17 +974,23 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
         } else {
             if (isCommand) {
                 // Always send for command registers — no read-skip optimization
-                if (DdcciSetFeatureVerified(h, vcp, want)) anySet = true;
-                gLastApplied.pm = (int)want;
+                if (DdcciSetFeatureVerified(h, vcp, want)) {
+                    anySet = true;
+                    gLastApplied.pm = (int)want;
+                }
             } else {
                 DWORD fType=0, fCur=0, fMax=0;
                 BOOL got = DdcciGetFeature(h, vcp, &fType, &fCur, &fMax);
                 if (got) {
                     if (firstTouch) vcpE2Orig = fCur;
                     if (force || fCur != want) {
-                        if (DdcciSetFeatureVerified(h, vcp, want)) anySet = true;
+                        if (DdcciSetFeatureVerified(h, vcp, want)) {
+                            anySet = true;
+                            gLastApplied.pm = (int)want;
+                        }
+                    } else {
+                        gLastApplied.pm = (int)want;
                     }
-                    gLastApplied.pm = (int)want;
                 }
             }
         }
@@ -842,20 +1003,22 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
         if (skip) {
             CrashLog("[display] B=%d unchanged, skip\n", preset->Brightness);
         } else {
-            DWORD mn=0, cur=0, mx=0; BOOL got=FALSE;
-            __try { got = GetMonitorBrightness(h, &mn, &cur, &mx); }
-            __except(EXCEPTION_EXECUTE_HANDLER) { }
+            DWORD mn=0, cur=0, mx=0;
+            BOOL got = DdcciGetRange(h, GetMonitorBrightness, &mn, &cur, &mx);
             if (got) {
                 if (firstTouch) { bMin=mn; bOrig=cur; bMax=mx; }
                 DWORD want = PctToRaw(preset->Brightness, mn, mx);
                 if (force || want != cur) {
-                    __try { SetMonitorBrightness(h, want); anySet = true; }
-                    __except(EXCEPTION_EXECUTE_HANDLER) { }
-                    gLastApplied.b = preset->Brightness;
-                    CrashLog("[display] SetBrightness %d%% (raw %lu)\n", preset->Brightness, want);
+                    if (DdcciSetRange(h, SetMonitorBrightness, want)) {
+                        anySet = true;
+                        gLastApplied.b = preset->Brightness;
+                        CrashLog("[display] SetBrightness %d%% (raw %lu)\n", preset->Brightness, want);
+                    }
                 } else {
                     gLastApplied.b = preset->Brightness; // already there
                 }
+            } else {
+                CrashLog("[display] GetBrightness FAILED\n");
             }
         }
     }
@@ -866,20 +1029,22 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
         if (skip) {
             CrashLog("[display] C=%d unchanged, skip\n", preset->Contrast);
         } else {
-            DWORD mn=0, cur=0, mx=0; BOOL got=FALSE;
-            __try { got = GetMonitorContrast(h, &mn, &cur, &mx); }
-            __except(EXCEPTION_EXECUTE_HANDLER) { }
+            DWORD mn=0, cur=0, mx=0;
+            BOOL got = DdcciGetRange(h, GetMonitorContrast, &mn, &cur, &mx);
             if (got) {
                 if (firstTouch) { cMin=mn; cOrig=cur; cMax=mx; }
                 DWORD want = PctToRaw(preset->Contrast, mn, mx);
                 if (force || want != cur) {
-                    __try { SetMonitorContrast(h, want); anySet = true; }
-                    __except(EXCEPTION_EXECUTE_HANDLER) { }
-                    gLastApplied.c = preset->Contrast;
-                    CrashLog("[display] SetContrast %d%% (raw %lu)\n", preset->Contrast, want);
+                    if (DdcciSetRange(h, SetMonitorContrast, want)) {
+                        anySet = true;
+                        gLastApplied.c = preset->Contrast;
+                        CrashLog("[display] SetContrast %d%% (raw %lu)\n", preset->Contrast, want);
+                    }
                 } else {
                     gLastApplied.c = preset->Contrast;
                 }
+            } else {
+                CrashLog("[display] GetContrast FAILED\n");
             }
         }
     }
@@ -896,8 +1061,10 @@ bool DisplayApplyPreset(HWND hwnd, const DISPLAY_PRESET* preset, bool force) {
             if (got) {
                 if (firstTouch && vcpCur) vcp14Orig = vcpCur;
                 if (force || want14 != (BYTE)vcpCur) {
-                    if (DdcciSetFeatureVerified(h, 0x14, want14)) anySet = true;
-                    gLastApplied.ct = (int)want14;
+                    if (DdcciSetFeatureVerified(h, 0x14, want14)) {
+                        anySet = true;
+                        gLastApplied.ct = (int)want14;
+                    }
                 } else {
                     gLastApplied.ct = (int)want14;
                 }
@@ -940,11 +1107,11 @@ void DisplayRestoreAll(void) {
     if (n == 0) return;
 
     HANDLE h = pm[0].hPhysicalMonitor;
-    // Restore preset mode first, then B/C/CT on top
-    if (snap.hasSnapshot)      SetVCPFeature(h, 0xE2,  snap.origVcpF0);
-    if (snap.origVcp14)        SetVCPFeature(h, 0x14,  snap.origVcp14);
-    if (snap.bMax > snap.bMin) SetMonitorBrightness(h, snap.bOrig);
-    if (snap.cMax > snap.cMin) SetMonitorContrast(h,   snap.cOrig);
+    // Restore preset mode first, then B/C/CT on top.
+    if (snap.origVcpF0)        DdcciSetFeature(h, 0xE2, snap.origVcpF0);
+    if (snap.origVcp14)        DdcciSetFeature(h, 0x14, snap.origVcp14);
+    if (snap.bMax > snap.bMin) DdcciSetRange(h, SetMonitorBrightness, snap.bOrig);
+    if (snap.cMax > snap.cMin) DdcciSetRange(h, SetMonitorContrast, snap.cOrig);
 
     DestroyPhysicalMonitors(n, pm);
 

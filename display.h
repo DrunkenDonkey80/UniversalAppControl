@@ -45,6 +45,7 @@ int  DisplayReadCurrentPreset(void);  // VCP 0xE2 picture mode
 bool   DisplayIsInited(void);
 void   DisplayPopulatePresetsFromCaps(void); // fill gMonPresets from capabilities VCP list
 HANDLE DisplayGetPrimaryHandle(void); // opens+returns primary physical monitor handle (caller must NOT destroy)
+void DisplayProbeVcp(BYTE vcpCode, BOOL* outOk, DWORD* outCur, DWORD* outMax); // read-only diagnostic probe
 
 // Add vcpCode to gMonPresets[] if not already present.
 // Returns true if a new entry was added, false if it was already there.

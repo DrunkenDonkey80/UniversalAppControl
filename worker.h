@@ -10,7 +10,7 @@ typedef enum {
     JOB_APPLY_DISPLAY        // apply / reconcile monitor preset
 } JobType;
 
-typedef struct { JobType type; int hotkeyIndex; } Job;
+typedef struct { JobType type; int hotkeyIndex; LONG hotkeyGeneration; } Job;
 
 // The latest desired monitor state.  Written by the main-loop poll under
 // gHotkeyLock, read by the worker thread.  Only one instance exists;

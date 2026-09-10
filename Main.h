@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Windows.h>
+
 #pragma warning(disable:4820) // padding in structures
 
 #define VERSION L"1.2.0"
@@ -118,7 +120,8 @@ extern NOTIFYICONDATA gTrayNotifyIconData;
 bool LoadConfig(void);
 
 extern CRITICAL_SECTION gHotkeyLock;   // guards gHotkeys/gNumHotkeys + Triggered
+extern volatile LONG gHotkeyGeneration;
 extern HWND gScanNotifyHwnd;           // preset editor HWND to notify when scan done
-void DispatchHotkey(int hotkeyIndex);  // worker-side: runs the heavy toggle work
+void DispatchHotkey(int hotkeyIndex, LONG expectedGeneration);
 void RebuildHotkeys(void);             // rebuild gHotkeys from in-memory gProfiles; caller holds gHotkeyLock
 const wchar_t* GetExePath(void);

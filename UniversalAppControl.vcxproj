@@ -157,6 +157,7 @@
     <ClCompile Include="settings_ui.c" />
     <ClCompile Include="install.c" />
     <ClCompile Include="selftest.c" />
+    <ClCompile Include="update.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="display.h" />
@@ -169,6 +170,7 @@
     <ClInclude Include="settings_ui.h" />
     <ClInclude Include="install.h" />
     <ClInclude Include="selftest.h" />
+    <ClInclude Include="update.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="UniversalAppControl.rc" />

@@ -4,7 +4,7 @@
 
 #pragma warning(disable:4820) // padding in structures
 
-#define VERSION L"1.2.0"
+#define VERSION L"1.3.0"
 #define APPNAME L"UniversalAppControl"
 
 // The Lord's data types.

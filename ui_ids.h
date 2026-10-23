@@ -7,6 +7,8 @@
 #define IDM_OPENINI    2004
 #define IDM_QUIT       2005
 #define IDM_UNHIDE     2006
+#define IDM_UPDATE_CHECK 2007
+#define IDM_UPDATE_APPLY 2008
 
 // Settings window controls
 #define IDC_LIST       3001
@@ -29,6 +31,7 @@
 #define IDC_OPENINI    3011
 #define IDC_INSTALL    3012
 #define IDC_STATUS     3013
+#define IDC_UPDATE     3014  // "Check for updates" / "Restart to update"
 
 // Process picker controls
 #define IDC_PICKLIST   3101

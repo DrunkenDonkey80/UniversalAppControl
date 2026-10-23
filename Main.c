@@ -26,6 +26,7 @@
 #include "install.h"
 #include "selftest.h"
 #include "display.h"
+#include "update.h"
 
 _NtSuspendProcess NtSuspendProcess;
 _NtResumeProcess NtResumeProcess;
@@ -1018,6 +1019,12 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 			}
 			break;
 		}
+		case WM_TIMER:
+			if (WParam == UPDATE_TIMER_ID) UpdateOnTimer();
+			break;
+		case WM_UPDATE_DONE:
+			UpdateOnDone(Window, (int)WParam, LParam != 0);
+			break;
 		case WM_TRAYICON:
 		{
 			if (LParam == WM_LBUTTONUP || LParam == WM_LBUTTONDBLCLK) {
@@ -1027,12 +1034,20 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 			if (LParam == WM_RBUTTONUP) {
 				FixStartupPathIfStale();
 				HMENU menu = CreatePopupMenu();
+				if (gUpdateReady) {
+					wchar_t upd[64];
+					swprintf_s(upd, _countof(upd), L"Restart to update to %s", gUpdateVersion);
+					AppendMenuW(menu, MF_STRING, IDM_UPDATE_APPLY, upd);
+					AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+				}
 				AppendMenuW(menu, MF_STRING, IDM_SETTINGS, L"Settings...");
 				AppendMenuW(menu, MF_STRING, IDM_UNHIDE, L"Unhide hidden apps");
 				AppendMenuW(menu, MF_STRING | (IsStartupEnabled() ? MF_CHECKED : 0),
 				            IDM_STARTUP, L"Run at Windows startup");
 				AppendMenuW(menu, MF_STRING, IDM_INSTALL, L"Install to user programs...");
 				AppendMenuW(menu, MF_STRING, IDM_OPENINI, L"Open INI folder");
+				if (!gUpdateReady)
+					AppendMenuW(menu, MF_STRING, IDM_UPDATE_CHECK, L"Check for updates");
 				AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
 				AppendMenuW(menu, MF_STRING, IDM_QUIT, L"Quit");
 
@@ -1064,6 +1079,8 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 				case IDM_STARTUP:  SetStartupEnabled(!IsStartupEnabled()); break;
 				case IDM_INSTALL:  InstallToUserPrograms(Window); break;
 				case IDM_OPENINI:  OpenConfigFolder(); break;
+				case IDM_UPDATE_CHECK: UpdateCheck(true); break;
+				case IDM_UPDATE_APPLY: UpdateApply(Window); break;
 				case IDM_QUIT:
 					Shell_NotifyIconW(NIM_DELETE, &gTrayNotifyIconData);
 					gIsRunning = FALSE;
@@ -1255,6 +1272,8 @@ int WINAPI wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE PrevInstance, _I
 			goto Exit;
 		}
 	}
+
+	UpdateInit(gTrayNotifyIconData.hWnd);
 
 	if (!autostart)
 		ShowSettingsWindow(Instance, gTrayNotifyIconData.hWnd);

@@ -12,6 +12,7 @@
 #include "install.h"
 #include "Main.h"
 #include "ui_ids.h"
+#include "update.h"
 
 static int gFails = 0;
 static FILE* gLog = NULL;
@@ -115,6 +116,25 @@ int RunSelfTests(void) {
         CHECK(SetStartupEnabled(false), L"SetStartupEnabled(false) ok");
         CHECK(!IsStartupEnabled(), L"startup reads back disabled");
         if (was) SetStartupEnabled(true);
+    }
+
+    {
+        CHECK(UpdateCompareVersions("v1.3.0", "1.2.9") > 0, L"update: newer tag wins");
+        CHECK(UpdateCompareVersions("v1.2.10", "1.2.9") > 0, L"update: numeric not lexical");
+        CHECK(UpdateCompareVersions("v1.3.0", "1.3.0") == 0, L"update: same version");
+        CHECK(UpdateCompareVersions("v1.2.0", "1.3.0") < 0, L"update: older tag");
+
+        const char* json =
+            "{\"tag_name\": \"v1.4.0\", \"assets\": ["
+            "{\"browser_download_url\": \"https://evil.example/UniversalAppControl.exe\"},"
+            "{\"browser_download_url\": \"https://github.com/DrunkenDonkey80/UniversalAppControl/releases/download/v1.4.0/notes.txt\"},"
+            "{\"browser_download_url\":\"https://github.com/DrunkenDonkey80/UniversalAppControl/releases/download/v1.4.0/UniversalAppControl.exe\"}]}";
+        char tag[32], url[512];
+        bool ok = UpdateParseRelease(json, tag, sizeof(tag), url, sizeof(url));
+        CHECK(ok && strcmp(tag, "v1.4.0") == 0 && strstr(url, "/v1.4.0/UniversalAppControl.exe"),
+              L"update: parses tag and picks this repo's exe asset");
+        CHECK(!UpdateParseRelease("{\"tag_name\":\"v2\",\"assets\":[]}", tag, sizeof(tag), url, sizeof(url)),
+              L"update: no exe asset -> no update");
     }
 
     LogLine(L"--- %d failure(s) ---", gFails);

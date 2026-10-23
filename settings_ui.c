@@ -6,6 +6,7 @@
 #include "install.h"
 #include "worker.h"
 #include "display.h"
+#include "update.h"
 #include <commctrl.h>
 #include <windowsx.h>
 #include <shlwapi.h>
@@ -292,6 +293,18 @@ static LRESULT CALLBACK HotkeyEditSubclass(HWND hWnd, UINT msg, WPARAM wp, LPARA
 #define FW  243    // form field width
 #define RPW 312    // full right panel width (FX + FW - RX)
 
+static void SetUpdateButtonText(HWND wnd) {
+    wchar_t t[64] = L"Check for updates";
+    if (gUpdateReady)
+        swprintf_s(t, _countof(t), L"Restart to update to %s", gUpdateVersion);
+    SetDlgItemTextW(wnd, IDC_UPDATE, t);
+    InvalidateRect(GetDlgItem(wnd, IDC_UPDATE), NULL, TRUE);  // owner-drawn
+}
+
+void SettingsRefreshUpdateButton(void) {
+    if (gSettingsWnd) SetUpdateButtonText(gSettingsWnd);
+}
+
 static void CreateControls(HWND wnd) {
     // --- List (left panel) ---
     HWND list = MakeChild(wnd, WC_LISTVIEWW, L"",
@@ -359,6 +372,10 @@ static void CreateControls(HWND wnd) {
 
     MakeBtn(wnd, L"Open INI folder",              RX,         ry, 151, 28, IDC_OPENINI);
     MakeBtn(wnd, L"Install to user programs...",  RX+151+5,   ry, 156, 28, IDC_INSTALL);
+    ry += 34;
+
+    MakeBtn(wnd, L"", RX, ry, RPW, 28, IDC_UPDATE);
+    SetUpdateButtonText(wnd);
 }
 
 static void ApplyFieldsToSelection(HWND wnd) {
@@ -1045,6 +1062,10 @@ static LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 case IDC_OPENINI:  OpenConfigFolder(); break;
                 case IDC_INSTALL:  InstallToUserPrograms(wnd); break;
+                case IDC_UPDATE:
+                    PostMessageW(gTrayNotifyIconData.hWnd, WM_COMMAND,
+                                 gUpdateReady ? IDM_UPDATE_APPLY : IDM_UPDATE_CHECK, 0);
+                    break;
                 case IDC_ADD: {
                     wchar_t name[MAX_NAME], path[MAX_PATH];
                     if (PickRunningProcess(wnd, name, MAX_NAME, path, MAX_PATH)

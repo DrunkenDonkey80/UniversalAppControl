@@ -27,6 +27,15 @@ jobs:
           /p:Configuration=Release /p:Platform=x64
           /p:PlatformToolset=v143 /verbosity:minimal
 
+      - name: Run selftest
+        shell: pwsh
+        # GUI exe: wait on the process; exit code = failure count.
+        run: |
+          $exe = 'x64\Release\UniversalAppControl.exe'
+          $p = Start-Process $exe --selftest -Wait -PassThru
+          Get-Content "$env:TEMP\uac-selftest.txt"
+          exit $p.ExitCode
+
       - name: Upload executable
         # actions/upload-artifact v4
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

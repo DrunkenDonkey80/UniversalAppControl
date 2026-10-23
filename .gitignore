@@ -230,3 +230,8 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+
+# Agent/tool scratch state
+data/
+.superpowers/
+.pi/

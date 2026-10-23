@@ -11,6 +11,7 @@
 #include "worker.h"
 #include "install.h"
 #include "Main.h"
+#include "ui_ids.h"
 
 static int gFails = 0;
 static FILE* gLog = NULL;
@@ -43,10 +44,10 @@ int RunSelfTests(void) {
     {
         const wchar_t* p = GetConfigPath();
         size_t len = wcslen(p);
-        const wchar_t* suffix = L"\\UniversalAppControl\\config.ini";
+        const wchar_t* suffix = L"\\UniversalAppControl.ini";
         bool endsOk = len > wcslen(suffix) &&
             _wcsicmp(p + len - wcslen(suffix), suffix) == 0;
-        CHECK(endsOk, L"GetConfigPath ends with UniversalAppControl\\config.ini");
+        CHECK(endsOk, L"GetConfigPath ends with UniversalAppControl.ini");
         CHECK(GetFileAttributesW(GetConfigDir()) != INVALID_FILE_ATTRIBUTES,
               L"GetConfigDir exists after call");
     }
@@ -67,7 +68,7 @@ int RunSelfTests(void) {
     }
 
     {
-        // SaveConfig writes the REAL %APPDATA% config, so back it up first and restore after.
+        // SaveConfig writes the REAL config, so back it up first and restore after.
         const wchar_t* cfg = GetConfigPath();
         wchar_t bak[MAX_PATH];
         swprintf_s(bak, _countof(bak), L"%s.selftest.bak", cfg);
@@ -79,8 +80,7 @@ int RunSelfTests(void) {
         wcscpy_s(gProfiles[0].ProgramPath, MAX_PATH, L"C:\\x\\Viber.exe");
         gProfiles[0].HotKey = 'V';
         gProfiles[0].HotKeyModifiers = MOD_CONTROL | MOD_ALT;
-        gProfiles[0].HideEnabled = TRUE;
-        gProfiles[0].PauseEnabled = TRUE;
+        gProfiles[0].Operation = PROF_OP_PAUSE;  // load derives Hide/PauseEnabled from this
         SaveConfig();
 
         gNumProfiles = 0;

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-2022
+    runs-on: windows-2025  # ships VS 2026 (v145), same as local
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -21,11 +21,9 @@ jobs:
       - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce
 
       - name: Build Release x64
-        # Override the local v180 default with the runner's VS 2022 toolset.
         run: >-
           msbuild UniversalAppControl.sln /m
-          /p:Configuration=Release /p:Platform=x64
-          /p:PlatformToolset=v143 /verbosity:minimal
+          /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
 
       - name: Run selftest
         shell: pwsh

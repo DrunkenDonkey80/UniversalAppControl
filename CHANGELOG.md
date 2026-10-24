@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.3.2
+- Minimize/restore hotkeys: a maximized window (e.g. Viber) now always comes back maximized and in front. Previously a quick double press, or restoring the window from the taskbar in between, could un-maximize it or only flash its taskbar button.
+
 ## 1.3.1
 - Tray menu: "Copy config to clipboard" and "Paste config from clipboard..." to move the config between PCs. Paste asks first, keeps the old config as `UniversalAppControl.ini.bak`, restores hidden apps and reloads without a restart.
 

@@ -678,13 +678,17 @@ bool HideWindowForProfile(HWND hWnd, int profileId, HWND activeWindow) {
 			windowChanged = true;
 		}
 		else if (op == PROF_OP_MINIMIZE && IsWindowVisible(hWnd) && !IsIconic(hWnd)) {
-			// Match the title-bar button so apps preserve their maximized restore state.
-			windowChanged = PostMessageW(hWnd, WM_SYSCOMMAND, SC_MINIMIZE, 0) != FALSE;
+			// Synchronous so the next hotkey sees the real state; ABORTIFHUNG keeps a hung app from blocking us.
+			windowChanged = SendMessageTimeoutW(hWnd, WM_SYSCOMMAND, SC_MINIMIZE, 0,
+			                                    SMTO_ABORTIFHUNG, 1000, NULL) != 0;
 		}
 
-		if (windowChanged && gProfiles[profileId].NumHiddenWindows < MAX_PROCESSES_PER_PROFILE) {
-			gProfiles[profileId].HiddenWindows[gProfiles[profileId].NumHiddenWindows++] = hWnd;
-		}
+		PROFILE_CONFIG* p = &gProfiles[profileId];
+		bool tracked = false;  // a window restored outside our hotkey stays in the list
+		for (int i = 0; i < p->NumHiddenWindows && !tracked; i++)
+			tracked = p->HiddenWindows[i] == hWnd;
+		if (windowChanged && !tracked && p->NumHiddenWindows < MAX_PROCESSES_PER_PROFILE)
+			p->HiddenWindows[p->NumHiddenWindows++] = hWnd;
 	}
 
 	return windowChanged;
@@ -721,7 +725,10 @@ bool RestoreWindow(HWND hWnd, bool hide, bool minimise) {
 		windowChanged = true;
 	}
 	else if (minimise && IsIconic(hWnd)) {
-		windowChanged = PostMessageW(hWnd, WM_SYSCOMMAND, SC_RESTORE, 0) != FALSE;
+		// SC_RESTORE on a maximized window un-maximizes it, so it must never be queued twice:
+		// restore synchronously (like AHK's WinActivate) so the IsIconic check above stays true.
+		windowChanged = SendMessageTimeoutW(hWnd, WM_SYSCOMMAND, SC_RESTORE, 0,
+		                                    SMTO_ABORTIFHUNG, 1000, NULL) != 0;
 	}
 
 	return windowChanged;
@@ -1014,8 +1021,11 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 				BOOL activated = SetForegroundWindow(target);
 				SetWindowPos(target, HWND_TOP, 0, 0, 0, 0,
 				             SWP_NOMOVE | SWP_NOSIZE | SWP_ASYNCWINDOWPOS);
-				CrashLog("[focus] target=%p activated=%d foreground=%p\n",
-				         (void*)target, activated, (void*)GetForegroundWindow());
+				HWND fgw = GetForegroundWindow();
+				char fgCls[64] = ""; DWORD fgPid = 0;
+				if (fgw) { GetClassNameA(fgw, fgCls, sizeof(fgCls)); GetWindowThreadProcessId(fgw, &fgPid); }
+				CrashLog("[focus] target=%p activated=%d foreground=%p cls=%s pid=%lu\n",
+				         (void*)target, activated, (void*)fgw, fgCls, fgPid);
 			}
 			break;
 		}

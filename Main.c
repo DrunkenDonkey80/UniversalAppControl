@@ -1046,6 +1046,8 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 				            IDM_STARTUP, L"Run at Windows startup");
 				AppendMenuW(menu, MF_STRING, IDM_INSTALL, L"Install to user programs...");
 				AppendMenuW(menu, MF_STRING, IDM_OPENINI, L"Open INI folder");
+				AppendMenuW(menu, MF_STRING, IDM_CFG_COPY, L"Copy config to clipboard");
+				AppendMenuW(menu, MF_STRING, IDM_CFG_PASTE, L"Paste config from clipboard...");
 				if (!gUpdateReady)
 					AppendMenuW(menu, MF_STRING, IDM_UPDATE_CHECK, L"Check for updates");
 				AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -1079,6 +1081,15 @@ LRESULT CALLBACK SysTrayCallback(_In_ HWND Window, _In_ UINT Message, _In_ WPARA
 				case IDM_STARTUP:  SetStartupEnabled(!IsStartupEnabled()); break;
 				case IDM_INSTALL:  InstallToUserPrograms(Window); break;
 				case IDM_OPENINI:  OpenConfigFolder(); break;
+				case IDM_CFG_COPY: ConfigCopyToClipboard(Window); break;
+				case IDM_CFG_PASTE:
+					// Hidden windows are tracked per profile; restore them before profiles are replaced.
+					SendMessageW(Window, WM_COMMAND, IDM_UNHIDE, 0);
+					if (ConfigPasteFromClipboard(Window) && gSettingsWnd) {
+						DestroyWindow(gSettingsWnd);  // its list shows the old profiles
+						ShowSettingsWindow(GetModuleHandleW(NULL), Window);
+					}
+					break;
 				case IDM_UPDATE_CHECK: UpdateCheck(true); break;
 				case IDM_UPDATE_APPLY: UpdateApply(Window); break;
 				case IDM_QUIT:

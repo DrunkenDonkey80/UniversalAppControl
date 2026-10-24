@@ -9,6 +9,8 @@
 #define IDM_UNHIDE     2006
 #define IDM_UPDATE_CHECK 2007
 #define IDM_UPDATE_APPLY 2008
+#define IDM_CFG_COPY   2009
+#define IDM_CFG_PASTE  2010
 
 // Settings window controls
 #define IDC_LIST       3001

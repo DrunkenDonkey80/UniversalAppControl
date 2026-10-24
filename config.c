@@ -2,6 +2,7 @@
 #include "display.h"
 #include "keys.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -227,4 +228,100 @@ void SaveConfig(void) {
             WritePrivateProfileStringW(section, L"DisplayPreset",
                                        p->DisplayPreset, path);
     }
+}
+
+// ---- Clipboard export / import (move config between PCs) ----
+
+bool ConfigCopyToClipboard(HWND owner) {
+    HANDLE f = CreateFileW(GetConfigPath(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        MessageBoxW(owner, L"There is no config to copy yet.", APPNAME, MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+    DWORD n = GetFileSize(f, NULL), got = 0;
+    char* raw = (n != INVALID_FILE_SIZE && n < (1u << 20)) ? malloc(n + 2) : NULL;
+    bool ok = raw && ReadFile(f, raw, n, &got, NULL) && got == n;
+    CloseHandle(f);
+
+    HGLOBAL mem = NULL;
+    if (ok) {
+        raw[n] = raw[n + 1] = 0;
+        // WritePrivateProfileString creates ANSI files; an imported file is UTF-16.
+        bool utf16 = n >= 2 && (BYTE)raw[0] == 0xFF && (BYTE)raw[1] == 0xFE;
+        int cch = utf16 ? (int)(n / 2) : MultiByteToWideChar(CP_ACP, 0, raw, (int)n, NULL, 0);
+        mem = GlobalAlloc(GMEM_MOVEABLE, ((size_t)cch + 1) * sizeof(wchar_t));
+        wchar_t* w = mem ? GlobalLock(mem) : NULL;
+        if (w) {
+            if (utf16) memcpy(w, raw + 2, (size_t)(cch - 1) * sizeof(wchar_t)), cch--;
+            else MultiByteToWideChar(CP_ACP, 0, raw, (int)n, w, cch);
+            w[cch] = 0;
+            GlobalUnlock(mem);
+        }
+        ok = w && OpenClipboard(owner);
+        if (ok) {
+            EmptyClipboard();
+            ok = SetClipboardData(CF_UNICODETEXT, mem) != NULL;
+            CloseClipboard();
+        }
+        if (ok) mem = NULL;  // clipboard owns it now
+    }
+    if (mem) GlobalFree(mem);
+    free(raw);
+    MessageBoxW(owner, ok ? L"Config copied to the clipboard.\nPaste it on the other PC with \"Paste config from clipboard\"."
+                          : L"Could not copy the config to the clipboard.",
+                APPNAME, MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONERROR));
+    return ok;
+}
+
+// Replaces the config file with clipboard text and reloads it. Caller restores
+// hidden windows first and holds no locks.
+bool ConfigPasteFromClipboard(HWND owner) {
+    wchar_t* text = NULL;
+    if (OpenClipboard(owner)) {
+        HANDLE h = GetClipboardData(CF_UNICODETEXT);
+        const wchar_t* w = h ? GlobalLock(h) : NULL;
+        if (w) { text = _wcsdup(w); GlobalUnlock(h); }
+        CloseClipboard();
+    }
+    // Every saved config has a [general] section; anything else is not ours.
+    if (!text || !StrStrIW(text, L"[general]") || wcslen(text) > (1u << 19)) {
+        free(text);
+        MessageBoxW(owner, L"The clipboard does not contain a " APPNAME L" config.\n"
+                           L"Use \"Copy config to clipboard\" on the other PC first.",
+                    APPNAME, MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    if (MessageBoxW(owner, L"Replace the current config with the one from the clipboard?\n"
+                           L"The current config is kept as UniversalAppControl.ini.bak.",
+                    APPNAME, MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        free(text);
+        return false;
+    }
+
+    const wchar_t* path = GetConfigPath();
+    wchar_t bak[MAX_PATH + 8];
+    swprintf_s(bak, _countof(bak), L"%s.bak", path);
+    CopyFileW(path, bak, FALSE);
+
+    bool ok = false;
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        DWORD bytes = (DWORD)(wcslen(text) * sizeof(wchar_t)), w1 = 0, w2 = 0;
+        ok = WriteFile(f, "\xFF\xFE", 2, &w1, NULL) && WriteFile(f, text, bytes, &w2, NULL) && w2 == bytes;
+        CloseHandle(f);
+    }
+    free(text);
+    if (!ok) {
+        CopyFileW(bak, path, FALSE);
+        MessageBoxW(owner, L"Could not write the config file.", APPNAME, MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    EnterCriticalSection(&gHotkeyLock);
+    LoadConfig();
+    RebuildHotkeys();
+    LeaveCriticalSection(&gHotkeyLock);
+    LoadMonPresets();
+    MessageBoxW(owner, L"Config imported.", APPNAME, MB_OK | MB_ICONINFORMATION);
+    return true;
 }

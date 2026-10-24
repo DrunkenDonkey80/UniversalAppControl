@@ -18,3 +18,7 @@ int GetOrCreatePreset(const wchar_t* name);
 // Persist / restore the scanned VCP 0xF0 preset table.
 void SaveMonPresets(void);
 void LoadMonPresets(void);
+
+// Copy the ini to the clipboard / replace it from the clipboard and reload.
+bool ConfigCopyToClipboard(HWND owner);
+bool ConfigPasteFromClipboard(HWND owner);

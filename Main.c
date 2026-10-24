@@ -665,6 +665,12 @@ u32 GetForegroundWindowProcessID() {
 	return ProcessId;
 }
 
+// Invisible helper windows (e.g. Tauri's "Tao Thread Event Target") report WS_VISIBLE but must not be
+// minimized/restored: restoring one activates it instead of the real window.
+static bool IsHelperWindow(HWND h) {
+	return (GetWindowLongW(h, GWL_EXSTYLE) & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0;
+}
+
 bool HideWindowForProfile(HWND hWnd, int profileId, HWND activeWindow) {
 	bool windowChanged = false;
 	
@@ -677,7 +683,7 @@ bool HideWindowForProfile(HWND hWnd, int profileId, HWND activeWindow) {
 			ShowWindow(hWnd, SW_HIDE);
 			windowChanged = true;
 		}
-		else if (op == PROF_OP_MINIMIZE && IsWindowVisible(hWnd) && !IsIconic(hWnd)) {
+		else if (op == PROF_OP_MINIMIZE && IsWindowVisible(hWnd) && !IsIconic(hWnd) && !IsHelperWindow(hWnd)) {
 			// Synchronous so the next hotkey sees the real state; ABORTIFHUNG keeps a hung app from blocking us.
 			windowChanged = SendMessageTimeoutW(hWnd, WM_SYSCOMMAND, SC_MINIMIZE, 0,
 			                                    SMTO_ABORTIFHUNG, 1000, NULL) != 0;
@@ -725,10 +731,11 @@ bool RestoreWindow(HWND hWnd, bool hide, bool minimise) {
 		windowChanged = true;
 	}
 	else if (minimise && IsIconic(hWnd)) {
-		// SC_RESTORE on a maximized window un-maximizes it, so it must never be queued twice:
-		// restore synchronously (like AHK's WinActivate) so the IsIconic check above stays true.
-		windowChanged = SendMessageTimeoutW(hWnd, WM_SYSCOMMAND, SC_RESTORE, 0,
-		                                    SMTO_ABORTIFHUNG, 1000, NULL) != 0;
+		// ShowWindow like AHK's WinActivate: some apps (Tauri) un-maximize on a background SC_RESTORE.
+		// Synchronous so a second hotkey can't queue another restore; async only for a hung app.
+		if (IsHungAppWindow(hWnd)) ShowWindowAsync(hWnd, SW_RESTORE);
+		else ShowWindow(hWnd, SW_RESTORE);
+		windowChanged = true;
 	}
 
 	return windowChanged;
@@ -744,11 +751,16 @@ bool RestoreWindowsForPofile(int profileId) {
 		for (int i = 0; i < gNumWindowInfo; i++) {
 			if (_wcsicmp(gWindowInfo[i].ExeName, gProfiles[profileId].ProgramExeName) == 0 &&
 			    gProfiles[profileId].NumHiddenWindows < MAX_PROCESSES_PER_PROFILE &&
-			    IsWindowVisible(gWindowInfo[i].WindowHandle)) {
+			    IsWindowVisible(gWindowInfo[i].WindowHandle) && !IsHelperWindow(gWindowInfo[i].WindowHandle)) {
 				gProfiles[profileId].HiddenWindows[gProfiles[profileId].NumHiddenWindows++] = gWindowInfo[i].WindowHandle;
 			}
 		}
 	}
+
+	// Windows sometimes refuses foreground changes even right after our hotkey, and the window only
+	// flashes on the taskbar. Injecting an empty mouse event (as PowerToys does) restores the right.
+	INPUT noop = { .type = INPUT_MOUSE };
+	SendInput(1, &noop, sizeof(noop));
 
 	HWND toFocus = NULL;
 	DWORD trayThread = GetWindowThreadProcessId(gTrayNotifyIconData.hWnd, NULL);

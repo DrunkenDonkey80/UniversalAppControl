@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.3.4
+- Added a README with feature overview, screenshots and setup instructions. No program changes.
+
 ## 1.3.3
 - Minimize/restore hotkeys: apps like Pi Hub (Tauri) no longer just flash on the taskbar instead of coming to front, and no longer lose their maximized state when they were minimized by other means. Restores now work like AutoHotkey's WinActivate, and invisible helper windows are no longer minimized/restored.
 
